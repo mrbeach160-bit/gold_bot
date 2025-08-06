@@ -10,7 +10,7 @@ from .settings import (
     ModelConfig,
     AppConfig
 )
-from .manager import ConfigManager
+from .manager import ConfigManager, get_config, update_config, load_config
 from .validation import validate_config
 
 __all__ = [
@@ -19,5 +19,8 @@ __all__ = [
     'ModelConfig', 
     'AppConfig',
     'ConfigManager',
+    'get_config',
+    'update_config', 
+    'load_config',
     'validate_config'
 ]

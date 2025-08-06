@@ -1,0 +1,10 @@
+streamlit
+pandas
+requests
+pandas-ta
+plotly
+tensorflow
+scikit-learn
+xgboost
+matplotlib
+joblib

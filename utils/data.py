@@ -4,12 +4,59 @@ import requests
 import pandas as pd
 from datetime import datetime
 import time
+import os
+import sys
 
-def get_gold_data(api_key, interval, symbol, outputsize=500):
+# Add project root to path for config import
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from config import ConfigManager, get_config
+
+def get_gold_data(api_key=None, interval=None, symbol=None, outputsize=500):
     """
-    Mengambil data dari Twelve Data.
+    Mengambil data dari Twelve Data dengan integrasi configuration system.
     FINAL VERSION: Logika paginasi diperbaiki untuk mematuhi limit 5000 per permintaan.
+    
+    Args:
+        api_key: API key (optional, will use config if not provided)
+        interval: Data interval (optional, will use config if not provided)
+        symbol: Trading symbol (optional, will use config if not provided)
+        outputsize: Number of data points to fetch
     """
+    # Get configuration values if not provided
+    try:
+        config = get_config()
+        
+        if api_key is None:
+            api_key = config.api.twelve_data_key
+            if not api_key:
+                raise ValueError("Twelve Data API key not configured. Please set TWELVE_DATA_API_KEY environment variable or pass api_key parameter.")
+        
+        if interval is None:
+            interval = config.trading.timeframe
+        
+        if symbol is None:
+            symbol = config.trading.symbol
+            
+        # Use configured timeout and retries
+        timeout = config.api.api_timeout
+        max_retries = config.api.max_retries
+        
+    except RuntimeError:
+        # Configuration not loaded, use parameters as provided
+        if api_key is None:
+            raise ValueError("API key is required when configuration is not loaded")
+        if interval is None:
+            raise ValueError("Interval is required when configuration is not loaded")
+        if symbol is None:
+            raise ValueError("Symbol is required when configuration is not loaded")
+        
+        # Use default values
+        timeout = 30
+        max_retries = 3
+    
     all_data_list = []
     end_date = None
     remaining_size = outputsize
@@ -23,11 +70,31 @@ def get_gold_data(api_key, interval, symbol, outputsize=500):
         if end_date:
             api_url += f"&end_date={end_date}"
 
-        try:
-            response = requests.get(api_url)
-            response.raise_for_status()
-            data = response.json()
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                response = requests.get(api_url, timeout=timeout)
+                response.raise_for_status()
+                data = response.json()
+                break  # Success, exit retry loop
+                
+            except requests.exceptions.Timeout:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"Request timeout after {max_retries} attempts")
+                    return None
+                time.sleep(2 ** retry_count)  # Exponential backoff
+                continue
+                
+            except requests.exceptions.RequestException as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"Error koneksi saat mengambil data dari Twelve Data: {e}")
+                    return None
+                time.sleep(2 ** retry_count)  # Exponential backoff
+                continue
 
+        try:
             if 'values' not in data:
                 if data.get('code') == 429:
                     print("Batas API per menit tercapai. Menunggu 60 detik...")
@@ -54,13 +121,14 @@ def get_gold_data(api_key, interval, symbol, outputsize=500):
             
             # Beri jeda 1 detik untuk API gratis
             time.sleep(1)
+            break  # Successfully processed this batch, exit retry loop
 
-        except requests.exceptions.RequestException as e:
-            print(f"Error koneksi saat mengambil data dari Twelve Data: {e}")
-            return None
         except Exception as e:
-            print(f"Error saat memproses data: {e}")
-            return None
+            retry_count += 1
+            if retry_count >= max_retries:
+                print(f"Error saat memproses data: {e}")
+                return None
+            time.sleep(2 ** retry_count)  # Exponential backoff
             
     if not all_data_list:
         return None

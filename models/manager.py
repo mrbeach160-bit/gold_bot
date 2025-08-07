@@ -15,11 +15,25 @@ from .ensemble import MetaLearner, VotingEnsemble, WeightedVotingEnsemble
 
 # Try to import config system, fall back to defaults if not available
 try:
-    from config import ConfigManager, ModelConfig
+    from config import ConfigManager
+    from config.settings import ModelConfig
     CONFIG_AVAILABLE = True
 except ImportError:
     CONFIG_AVAILABLE = False
     print("Warning: Configuration system not available, using defaults")
+    
+    # Create a minimal ModelConfig class for fallback
+    class ModelConfig:
+        def __init__(self):
+            self.models_to_use = ["lstm", "xgb", "cnn", "svc", "nb", "meta"]
+            self.ensemble_method = "meta_learner"
+            self.confidence_threshold = 0.6
+            self.lstm_sequence_length = 60
+            self.cnn_sequence_length = 20
+            self.xgb_max_depth = 6
+            self.xgb_n_estimators = 100
+            self.epochs = 10
+            self.batch_size = 32
 
 
 class ModelManager:

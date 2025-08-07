@@ -663,6 +663,102 @@ class ConfigValidator:
         
         return True
     
+    def validate_trading_symbol(self, symbol: str) -> bool:
+        """
+        Validate trading symbol format.
+        
+        Args:
+            symbol: Trading symbol to validate
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        if not symbol or not symbol.strip():
+            self.errors.append("Trading symbol cannot be empty")
+            return False
+        
+        symbol = symbol.strip().upper()
+        
+        # Common symbol patterns
+        patterns = [
+            r'^[A-Z]{3,6}/[A-Z]{3,4}$',  # Forex/Crypto format (e.g., XAU/USD, BTC/USD)
+            r'^[A-Z]{3,10}USDT?$',       # Crypto format (e.g., BTCUSDT, ETHUSDT)
+            r'^[A-Z]{2,6}$',             # Stock format (e.g., AAPL, MSFT)
+        ]
+        
+        valid_format = any(re.match(pattern, symbol) for pattern in patterns)
+        
+        if not valid_format:
+            self.errors.append(f"Invalid symbol format: {symbol}. Expected formats: XAU/USD, BTCUSDT, or AAPL")
+            return False
+        
+        return True
+    
+    def validate_timeframe(self, timeframe: str) -> bool:
+        """
+        Validate timeframe format.
+        
+        Args:
+            timeframe: Timeframe to validate
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        valid_timeframes = [
+            "1min", "5min", "15min", "30min", "1h", "4h", "1day",
+            "1m", "5m", "15m", "30m", "1d"
+        ]
+        
+        if timeframe not in valid_timeframes:
+            self.errors.append(f"Invalid timeframe: {timeframe}. Valid options: {', '.join(valid_timeframes)}")
+            return False
+        
+        return True
+    
+    def validate_risk_parameters(self, risk_percentage: float, stop_loss_pips: int, take_profit_pips: int) -> bool:
+        """
+        Validate risk management parameters.
+        
+        Args:
+            risk_percentage: Risk percentage per trade
+            stop_loss_pips: Stop loss in pips
+            take_profit_pips: Take profit in pips
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        valid = True
+        
+        # Risk percentage validation
+        if risk_percentage <= 0:
+            self.errors.append("Risk percentage must be positive")
+            valid = False
+        elif risk_percentage > 10:
+            self.errors.append("Risk percentage cannot exceed 10% (extremely dangerous)")
+            valid = False
+        elif risk_percentage > 5:
+            self.warnings.append("Risk percentage > 5% is considered high risk")
+        
+        # Stop loss validation
+        if stop_loss_pips <= 0:
+            self.errors.append("Stop loss pips must be positive")
+            valid = False
+        elif stop_loss_pips < 5:
+            self.warnings.append("Stop loss < 5 pips may be too tight (frequent stop-outs)")
+        elif stop_loss_pips > 200:
+            self.warnings.append("Stop loss > 200 pips is very wide")
+        
+        # Take profit validation
+        if take_profit_pips <= 0:
+            self.errors.append("Take profit pips must be positive")
+            valid = False
+        elif take_profit_pips < stop_loss_pips:
+            self.warnings.append("Take profit is smaller than stop loss (negative risk:reward ratio)")
+        elif take_profit_pips > stop_loss_pips * 10:
+            self.warnings.append("Take profit is very large compared to stop loss (may rarely be hit)")
+        
+        return valid
+    
     def validate_model_parameters(self, models_to_use: List[str], confidence_threshold: float) -> bool:
         """
         Validate model configuration parameters.

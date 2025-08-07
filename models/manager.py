@@ -76,7 +76,7 @@ class ModelManager:
         
         # Initialize individual models
         for model_type in self.config.models_to_use:
-            if model_type.lower() in ['lstm', 'lightgbm', 'lgb', 'xgboost', 'xgb']:
+            if model_type.lower() in ['lstm', 'lightgbm', 'lgb', 'xgboost', 'xgb', 'svc', 'nb', 'naive_bayes', 'cnn']:
                 try:
                     model = create_model(model_type, self.symbol, self.timeframe)
                     self.models[model_type.lower()] = model

@@ -552,14 +552,18 @@ class XGBoostModel(BaseModel):
                   f"learning_rate={optimized_params['learning_rate']}, "
                   f"max_depth={optimized_params['max_depth']}")
             
-            # Train with early stopping
+            # Train with early stopping (using different approach for newer XGBoost)
             eval_set = [(X_test, y_test)]
-            self.model.fit(
-                X_train, y_train,
-                eval_set=eval_set,
-                early_stopping_rounds=50,
-                verbose=False
-            )
+            try:
+                # Try newer XGBoost API first
+                self.model.fit(
+                    X_train, y_train,
+                    eval_set=eval_set,
+                    verbose=False
+                )
+            except TypeError:
+                # Fallback for older XGBoost versions
+                self.model.fit(X_train, y_train, verbose=False)
             
             # Calculate accuracy
             y_pred = self.model.predict(X_test)

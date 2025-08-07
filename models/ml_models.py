@@ -10,7 +10,7 @@ import joblib
 import os
 import json
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 # Import technical indicators
 try:
@@ -23,8 +23,10 @@ except ImportError:
 # Try to import TensorFlow, handle gracefully if not available
 try:
     import tensorflow as tf
-    from tensorflow.keras.models import Sequential, load_model
-    from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
+    from tensorflow.keras.models import Sequential, Model, load_model
+    from tensorflow.keras.layers import (Dense, LSTM, Dropout, BatchNormalization, 
+                                       Input, MultiHeadAttention, LayerNormalization,
+                                       Add, GlobalAveragePooling1D, Concatenate)
     from tensorflow.keras.callbacks import EarlyStopping
     from sklearn.preprocessing import MinMaxScaler
     TENSORFLOW_AVAILABLE = True
@@ -113,170 +115,287 @@ def calculate_trading_metrics(y_true, y_pred, y_prob=None):
         return {'accuracy': 0.0, 'error': str(e)}
 
 
-class LSTMModel(BaseModel):
-    """LSTM neural network model migrated from utils/lstm_model.py"""
+class AdvancedLSTMModel(BaseModel):
+    """Enhanced LSTM with attention mechanism for advanced predictions."""
     
     def __init__(self, symbol: str, timeframe: str):
         super().__init__(symbol, timeframe)
         self.scaler = None
+        self.feature_scaler = None
         self.sequence_length = 60
+        self.use_attention = True
+        self.use_multivariate = True
         if not TENSORFLOW_AVAILABLE:
-            print(f"Warning: TensorFlow not available, LSTM model for {symbol} {timeframe} will not function")
+            print(f"Warning: TensorFlow not available, Advanced LSTM model for {symbol} {timeframe} will not function")
+    
+    def build_attention_lstm_model(self, input_shape, feature_dim=None):
+        """Build advanced LSTM model with attention mechanism."""
+        # Main sequence input (price data)
+        sequence_input = Input(shape=input_shape, name='sequence_input')
         
+        # LSTM layers with return_sequences=True for attention
+        lstm1 = LSTM(128, return_sequences=True, dropout=0.2, name='lstm1')(sequence_input)
+        lstm1_norm = BatchNormalization(name='lstm1_norm')(lstm1)
+        
+        # Self-attention layer
+        if self.use_attention:
+            attention = MultiHeadAttention(
+                num_heads=8, 
+                key_dim=16, 
+                dropout=0.1, 
+                name='self_attention'
+            )(lstm1_norm, lstm1_norm)
+            
+            # Add & Norm layer (residual connection)
+            attention_add = Add(name='attention_add')([lstm1_norm, attention])
+            attention_norm = LayerNormalization(name='attention_norm')(attention_add)
+        else:
+            attention_norm = lstm1_norm
+        
+        # Second LSTM layer
+        lstm2 = LSTM(64, return_sequences=True, dropout=0.2, name='lstm2')(attention_norm)
+        lstm2_norm = BatchNormalization(name='lstm2_norm')(lstm2)
+        
+        # Third LSTM layer (final)
+        lstm3 = LSTM(32, dropout=0.2, name='lstm3')(lstm2_norm)
+        lstm3_norm = BatchNormalization(name='lstm3_norm')(lstm3)
+        
+        # Feature input (if using multivariate features)
+        if feature_dim and self.use_multivariate:
+            feature_input = Input(shape=(feature_dim,), name='feature_input')
+            feature_dense = Dense(16, activation='relu', name='feature_dense')(feature_input)
+            feature_norm = BatchNormalization(name='feature_norm')(feature_dense)
+            
+            # Combine LSTM output with features
+            combined = Concatenate(name='combine_features')([lstm3_norm, feature_norm])
+            inputs = [sequence_input, feature_input]
+        else:
+            combined = lstm3_norm
+            inputs = sequence_input
+        
+        # Dense layers for final prediction
+        dense1 = Dense(16, activation='relu', name='dense1')(combined)
+        dropout1 = Dropout(0.3, name='dropout1')(dense1)
+        
+        # Multi-class output for BUY/HOLD/SELL
+        output = Dense(3, activation='softmax', name='predictions')(dropout1)
+        
+        # Create model
+        model = Model(inputs=inputs, outputs=output, name='AdvancedLSTM')
+        
+        return model
+        
+    def prepare_lstm_data(self, data: pd.DataFrame) -> Tuple:
+        """Prepare data for LSTM training with enhanced features."""
+        from .advanced_features import AdvancedDataPipeline
+        from .advanced_indicators import EnhancedIndicators
+        
+        # Apply advanced feature engineering
+        feature_pipeline = AdvancedDataPipeline(self.timeframe.replace('m', 'min'))
+        enhanced_data = feature_pipeline.transform(data.copy())
+        
+        # Apply enhanced indicators
+        indicator_calculator = EnhancedIndicators()
+        enhanced_data = indicator_calculator.add_all_indicators(enhanced_data)
+        
+        # Prepare target variable (multi-class: 0=SELL, 1=HOLD, 2=BUY)
+        future_returns = enhanced_data['close'].pct_change(periods=5).shift(-5)  # 5-period ahead returns
+        
+        # Define thresholds for classification
+        buy_threshold = 0.002   # 0.2% gain
+        sell_threshold = -0.002 # 0.2% loss
+        
+        targets = pd.Series(index=enhanced_data.index, data=1)  # Default to HOLD
+        targets[future_returns > buy_threshold] = 2   # BUY
+        targets[future_returns < sell_threshold] = 0  # SELL
+        
+        # Select features for LSTM sequence
+        sequence_features = ['open', 'high', 'low', 'close', 'volume']
+        if 'volume' not in enhanced_data.columns:
+            sequence_features = ['open', 'high', 'low', 'close']
+        
+        # Additional features (non-sequence) for multivariate model
+        feature_columns = [col for col in enhanced_data.columns 
+                          if col not in sequence_features + ['datetime'] 
+                          and enhanced_data[col].dtype in ['float64', 'int64']]
+        
+        # Scale sequence data
+        sequence_data = enhanced_data[sequence_features].values
+        self.scaler = MinMaxScaler()
+        scaled_sequence = self.scaler.fit_transform(sequence_data)
+        
+        # Scale additional features
+        if feature_columns and self.use_multivariate:
+            feature_data = enhanced_data[feature_columns].fillna(0).values
+            self.feature_scaler = MinMaxScaler()
+            scaled_features = self.feature_scaler.fit_transform(feature_data)
+        else:
+            scaled_features = None
+        
+        # Create sequences for LSTM
+        X_sequences, X_features, y = [], [], []
+        
+        for i in range(self.sequence_length, len(scaled_sequence) - 5):
+            if not np.isnan(targets.iloc[i]):
+                X_sequences.append(scaled_sequence[i-self.sequence_length:i])
+                if scaled_features is not None:
+                    X_features.append(scaled_features[i])
+                y.append(targets.iloc[i])
+        
+        X_sequences = np.array(X_sequences)
+        X_features = np.array(X_features) if scaled_features is not None else None
+        y = np.array(y)
+        
+        return X_sequences, X_features, y
+    
     def train(self, data: pd.DataFrame) -> bool:
-        """Train LSTM model with provided data."""
+        """Train advanced LSTM model with enhanced features."""
         if not TENSORFLOW_AVAILABLE:
-            print("Cannot train LSTM model: TensorFlow not available")
+            print("Cannot train Advanced LSTM model: TensorFlow not available")
             return False
             
         try:
-            print(f"Training LSTM model for {self.symbol} timeframe {self.timeframe}...")
+            print(f"Training Advanced LSTM model for {self.symbol} timeframe {self.timeframe}...")
             
-            # Prepare data with TimeSeriesSplit validation
-            close_data = data[['close']].values
-            self.scaler = MinMaxScaler()
-            scaled_data = self.scaler.fit_transform(close_data)
+            # Prepare enhanced data
+            X_sequences, X_features, y = self.prepare_lstm_data(data)
             
-            X, y = [], []
-            for i in range(self.sequence_length, len(scaled_data)):
-                X.append(scaled_data[i-self.sequence_length:i, 0])
-                y.append(scaled_data[i, 0])
-            
-            X, y = np.array(X), np.array(y)
-            X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-            
-            if len(X) < 100:
-                print(f"Insufficient data for LSTM training: {len(X)} samples")
+            if len(X_sequences) < 100:
+                print(f"Insufficient data for LSTM training: {len(X_sequences)} samples")
                 return False
             
-            # Use time series split for validation
-            tscv = TimeSeriesSplit(n_splits=3)  # Reduced splits for smaller datasets
-            val_losses = []
+            print(f"Prepared {len(X_sequences)} training samples")
+            print(f"Sequence shape: {X_sequences.shape}")
+            if X_features is not None:
+                print(f"Feature shape: {X_features.shape}")
             
-            for train_idx, val_idx in tscv.split(X):
-                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
-                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
-                
-                # Build enhanced LSTM model
-                fold_model = Sequential([
-                    LSTM(units=100, return_sequences=True, dropout=0.2, input_shape=(X.shape[1], 1)),
-                    BatchNormalization(),
-                    LSTM(units=50, return_sequences=True, dropout=0.2),
-                    LSTM(units=25, dropout=0.2),
-                    Dense(50, activation='relu'),
-                    Dropout(0.3),
-                    Dense(1, activation='sigmoid')
-                ])
-                
-                fold_model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-                
-                # Train with early stopping
-                early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-                history = fold_model.fit(
-                    X_train_fold, y_train_fold,
-                    validation_data=(X_val_fold, y_val_fold),
-                    epochs=50, batch_size=32, verbose=0,
-                    callbacks=[early_stopping]
-                )
-                
-                val_loss = min(history.history['val_loss'])
-                val_losses.append(val_loss)
-            
-            # Train final model on most recent data (preserving temporal order)
-            train_size = int(0.8 * len(X))
-            X_train, X_val = X[:train_size], X[train_size:]
+            # Train-validation split (temporal)
+            train_size = int(0.8 * len(X_sequences))
+            X_seq_train, X_seq_val = X_sequences[:train_size], X_sequences[train_size:]
             y_train, y_val = y[:train_size], y[train_size:]
             
-            # Clear session and build enhanced model
+            if X_features is not None:
+                X_feat_train, X_feat_val = X_features[:train_size], X_features[train_size:]
+                train_data = [X_seq_train, X_feat_train]
+                val_data = [X_seq_val, X_feat_val]
+                feature_dim = X_features.shape[1]
+            else:
+                train_data = X_seq_train
+                val_data = X_seq_val
+                feature_dim = None
+            
+            # Build advanced model
             tf.keras.backend.clear_session()
-            self.model = Sequential([
-                LSTM(units=100, return_sequences=True, dropout=0.2, input_shape=(X.shape[1], 1)),
-                BatchNormalization(),
-                LSTM(units=50, return_sequences=True, dropout=0.2),
-                LSTM(units=25, dropout=0.2),
-                Dense(50, activation='relu'),
-                Dropout(0.3),
-                Dense(1, activation='sigmoid')
-            ])
-            
-            self.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-            
-            # Train with early stopping
-            early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-            history = self.model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
-                epochs=50, batch_size=32, verbose=0,
-                callbacks=[early_stopping]
+            self.model = self.build_attention_lstm_model(
+                input_shape=(X_sequences.shape[1], X_sequences.shape[2]),
+                feature_dim=feature_dim
             )
             
-            # Print training results
-            final_loss = min(history.history['val_loss'])
-            cv_loss = np.mean(val_losses)
-            print(f"LSTM training completed.")
-            print(f"Cross-validation loss: {cv_loss:.6f} (+/- {np.std(val_losses)*2:.6f})")
-            print(f"Final validation loss: {final_loss:.6f}")
+            # Compile with appropriate loss for multi-class classification
+            self.model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            print("Model architecture:")
+            self.model.summary()
+            
+            # Train with early stopping and learning rate reduction
+            callbacks = [
+                EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss', factor=0.5, patience=5, min_lr=0.0001
+                )
+            ]
+            
+            history = self.model.fit(
+                train_data, y_train,
+                validation_data=(val_data, y_val),
+                epochs=100, batch_size=32, verbose=1,
+                callbacks=callbacks
+            )
+            
+            # Evaluate model
+            val_loss, val_acc = self.model.evaluate(val_data, y_val, verbose=0)
+            print(f"Advanced LSTM training completed.")
+            print(f"Final validation loss: {val_loss:.6f}")
+            print(f"Final validation accuracy: {val_acc:.4f}")
             print(f"Training stopped at epoch: {len(history.history['loss'])}")
             
             self._trained = True
             return True
             
         except Exception as e:
-            print(f"Error training LSTM model: {e}")
+            print(f"Error training Advanced LSTM model: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def predict(self, data: pd.DataFrame) -> Dict[str, Any]:
-        """Make prediction with LSTM model."""
+        """Generate advanced LSTM prediction with confidence."""
         if not TENSORFLOW_AVAILABLE:
             return self._unavailable_prediction("TensorFlow not available")
             
-        if not self._trained or self.model is None or self.scaler is None:
+        if not self._trained or self.model is None:
             return self._default_prediction()
         
         try:
-            # Predict next close price (minimal change from original)
-            last_sequence = data[["close"]].values[-self.sequence_length:]
-            scaled_seq = self.scaler.transform(last_sequence)
-            X = np.reshape(scaled_seq, (1, self.sequence_length, 1))
-            pred = self.model.predict(X, verbose=0)
-            pred_unscaled = self.scaler.inverse_transform(pred)
+            # Prepare data for prediction
+            X_sequences, X_features, _ = self.prepare_lstm_data(data)
             
-            current_price = data['close'].iloc[-1]
-            predicted_price = pred_unscaled[0][0]
+            if len(X_sequences) == 0:
+                return self._default_prediction()
             
-            # Convert to direction and confidence
-            price_diff = predicted_price - current_price
-            price_change_pct = abs(price_diff) / current_price
+            # Use the last sequence for prediction
+            last_sequence = X_sequences[-1:] 
             
-            if price_diff > 0:
-                direction = "BUY"
-            elif price_diff < 0:
-                direction = "SELL"
+            if X_features is not None and self.use_multivariate:
+                last_features = X_features[-1:]
+                prediction_input = [last_sequence, last_features]
             else:
-                direction = "HOLD"
-                
-            # Confidence based on percentage change
-            confidence = min(price_change_pct * 10, 1.0)  # Scale to 0-1
+                prediction_input = last_sequence
+            
+            # Get prediction probabilities
+            probabilities = self.model.predict(prediction_input, verbose=0)[0]
+            
+            # Extract class predictions
+            predicted_class = np.argmax(probabilities)
+            confidence = np.max(probabilities)
+            
+            # Map class to direction
+            class_to_direction = {0: 'SELL', 1: 'HOLD', 2: 'BUY'}
+            direction = class_to_direction[predicted_class]
+            
+            # Apply confidence threshold
+            if confidence < 0.6:
+                direction = 'HOLD'
+                predicted_class = 1
+                confidence = probabilities[1]  # Use HOLD confidence
             
             return {
                 'direction': direction,
-                'confidence': confidence,
-                'probability': confidence,
-                'model_name': 'LSTM',
+                'confidence': float(confidence),
+                'probability': float(confidence),
+                'model_name': 'AdvancedLSTM',
                 'timestamp': datetime.now(),
-                'features_used': ['close'],
-                'predicted_price': predicted_price,
-                'current_price': current_price
+                'features_used': ['enhanced_features', 'attention_mechanism'],
+                'class_probabilities': {
+                    'SELL': float(probabilities[0]),
+                    'HOLD': float(probabilities[1]),
+                    'BUY': float(probabilities[2])
+                },
+                'prediction_class': int(predicted_class)
             }
             
         except Exception as e:
-            print(f"Error making LSTM prediction: {e}")
+            print(f"Error making Advanced LSTM prediction: {e}")
             return self._default_prediction()
     
     def save(self) -> bool:
-        """Save LSTM model and scaler."""
+        """Save Advanced LSTM model and scalers."""
         if not TENSORFLOW_AVAILABLE:
-            print("Cannot save LSTM model: TensorFlow not available")
+            print("Cannot save Advanced LSTM model: TensorFlow not available")
             return False
             
         try:
@@ -286,51 +405,75 @@ class LSTMModel(BaseModel):
             model_path = self.get_model_path('.keras')
             self.model.save(model_path)
             
-            # Save scaler
+            # Save scalers
             scaler_path = self.get_model_path('_scaler.pkl')
             joblib.dump(self.scaler, scaler_path)
             
-            print(f"LSTM model saved to {model_path}")
+            if self.feature_scaler is not None:
+                feature_scaler_path = self.get_model_path('_feature_scaler.pkl')
+                joblib.dump(self.feature_scaler, feature_scaler_path)
+            
+            print(f"Advanced LSTM model saved to {model_path}")
             return True
             
         except Exception as e:
-            print(f"Error saving LSTM model: {e}")
+            print(f"Error saving Advanced LSTM model: {e}")
             return False
     
     def load(self) -> bool:
-        """Load LSTM model and scaler."""
+        """Load Advanced LSTM model and scalers."""
         if not TENSORFLOW_AVAILABLE:
-            print("Cannot load LSTM model: TensorFlow not available")
+            print("Cannot load Advanced LSTM model: TensorFlow not available")
             return False
             
         try:
+            # Load model
             model_path = self.get_model_path('.keras')
-            scaler_path = self.get_model_path('_scaler.pkl')
-            
-            if os.path.exists(model_path) and os.path.exists(scaler_path):
-                self.model = load_model(model_path)
-                self.scaler = joblib.load(scaler_path)
-                self._trained = True
-                print(f"LSTM model loaded from {model_path}")
-                return True
-            else:
-                print(f"LSTM model files not found: {model_path}, {scaler_path}")
+            if not os.path.exists(model_path):
+                print(f"Advanced LSTM model file not found: {model_path}")
                 return False
                 
+            self.model = load_model(model_path, compile=False)
+            
+            # Re-compile the model for predictions
+            self.model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                loss='sparse_categorical_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            # Load scalers
+            scaler_path = self.get_model_path('_scaler.pkl')
+            if os.path.exists(scaler_path):
+                self.scaler = joblib.load(scaler_path)
+            else:
+                print(f"Advanced LSTM scaler file not found: {scaler_path}")
+                return False
+            
+            feature_scaler_path = self.get_model_path('_feature_scaler.pkl')
+            if os.path.exists(feature_scaler_path):
+                self.feature_scaler = joblib.load(feature_scaler_path)
+            
+            self._trained = True
+            print(f"Advanced LSTM model loaded from {model_path}")
+            return True
+            
         except Exception as e:
-            print(f"Error loading LSTM model: {e}")
+            print(f"Error loading Advanced LSTM model: {e}")
             return False
     
     def get_model_info(self) -> Dict[str, Any]:
-        """Return LSTM model metadata."""
+        """Return Advanced LSTM model information."""
         return {
-            'name': 'LSTM',
-            'type': 'neural_network',
+            'name': 'AdvancedLSTM',
+            'type': 'neural_network_with_attention',
             'symbol': self.symbol,
             'timeframe': self.timeframe,
             'sequence_length': self.sequence_length,
+            'use_attention': self.use_attention,
+            'use_multivariate': self.use_multivariate,
             'trained': self._trained,
-            'features': ['close'],
+            'features': ['enhanced_features', 'attention_mechanism'],
             'model_path': self.get_model_path('.keras'),
             'available': TENSORFLOW_AVAILABLE
         }
@@ -341,7 +484,7 @@ class LSTMModel(BaseModel):
             'direction': 'HOLD',
             'confidence': 0.0,
             'probability': 0.0,
-            'model_name': 'LSTM',
+            'model_name': 'AdvancedLSTM',
             'timestamp': datetime.now(),
             'features_used': [],
             'error': reason
@@ -353,11 +496,15 @@ class LSTMModel(BaseModel):
             'direction': 'HOLD',
             'confidence': 0.0,
             'probability': 0.0,
-            'model_name': 'LSTM',
+            'model_name': 'AdvancedLSTM',
             'timestamp': datetime.now(),
             'features_used': [],
             'error': 'Model not trained or unavailable'
         }
+
+
+# For backward compatibility, create an alias
+LSTMModel = AdvancedLSTMModel
 
 
 class LightGBMModel(BaseModel):
@@ -928,6 +1075,508 @@ class XGBoostModel(BaseModel):
             'confidence': 0.0,
             'probability': 0.0,
             'model_name': 'XGBoost',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': 'Model not trained or unavailable'
+        }
+
+
+# Additional ML Models for Advanced Ensemble
+
+try:
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.svm import SVC
+    from sklearn.preprocessing import StandardScaler
+    HAS_SKLEARN_EXTRA = True
+except ImportError:
+    HAS_SKLEARN_EXTRA = False
+
+
+class RandomForestModel(BaseModel):
+    """Random Forest model for ensemble diversity."""
+    
+    def __init__(self, symbol: str, timeframe: str):
+        super().__init__(symbol, timeframe)
+        self.feature_columns = None
+        self.feature_scaler = None
+        if not HAS_SKLEARN_EXTRA:
+            print(f"Warning: sklearn not available, Random Forest model for {symbol} {timeframe} will not function")
+    
+    def prepare_features(self, data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+        """Prepare features for Random Forest training."""
+        from .advanced_features import AdvancedDataPipeline
+        from .advanced_indicators import EnhancedIndicators
+        
+        # Apply advanced feature engineering
+        feature_pipeline = AdvancedDataPipeline(self.timeframe.replace('m', 'min'))
+        enhanced_data = feature_pipeline.transform(data.copy())
+        
+        # Apply enhanced indicators
+        indicator_calculator = EnhancedIndicators()
+        enhanced_data = indicator_calculator.add_all_indicators(enhanced_data)
+        
+        # Prepare target variable (multi-class)
+        future_returns = enhanced_data['close'].pct_change(periods=5).shift(-5)
+        
+        buy_threshold = 0.002
+        sell_threshold = -0.002
+        
+        targets = pd.Series(index=enhanced_data.index, data=1)  # Default to HOLD
+        targets[future_returns > buy_threshold] = 2   # BUY
+        targets[future_returns < sell_threshold] = 0  # SELL
+        
+        # Select features (exclude target-related columns)
+        exclude_cols = ['datetime', 'close'] if 'datetime' in enhanced_data.columns else ['close']
+        feature_columns = [col for col in enhanced_data.columns 
+                          if col not in exclude_cols and enhanced_data[col].dtype in ['float64', 'int64']]
+        
+        features = enhanced_data[feature_columns].fillna(0)
+        
+        return features, targets
+    
+    def train(self, data: pd.DataFrame) -> bool:
+        """Train Random Forest model."""
+        if not HAS_SKLEARN_EXTRA:
+            print("Cannot train Random Forest model: sklearn not available")
+            return False
+            
+        try:
+            print(f"Training Random Forest model for {self.symbol} timeframe {self.timeframe}...")
+            
+            # Prepare features
+            features, targets = self.prepare_features(data)
+            
+            # Remove rows with NaN targets
+            valid_mask = ~targets.isna()
+            features = features[valid_mask]
+            targets = targets[valid_mask]
+            
+            if len(features) < 50:
+                print(f"Insufficient data for Random Forest training: {len(features)} samples")
+                return False
+            
+            print(f"Training with {len(features)} samples and {features.shape[1]} features")
+            
+            # Feature scaling
+            self.feature_scaler = StandardScaler()
+            features_scaled = self.feature_scaler.fit_transform(features)
+            
+            # Train-test split (temporal)
+            train_size = int(0.8 * len(features))
+            X_train, X_test = features_scaled[:train_size], features_scaled[train_size:]
+            y_train, y_test = targets[:train_size], targets[train_size:]
+            
+            # Train Random Forest
+            self.model = RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                min_samples_split=5,
+                min_samples_leaf=2,
+                random_state=42,
+                n_jobs=-1
+            )
+            
+            self.model.fit(X_train, y_train)
+            
+            # Evaluate
+            train_accuracy = self.model.score(X_train, y_train)
+            test_accuracy = self.model.score(X_test, y_test)
+            
+            print(f"Random Forest training completed.")
+            print(f"Training accuracy: {train_accuracy:.4f}")
+            print(f"Testing accuracy: {test_accuracy:.4f}")
+            
+            # Feature importance
+            feature_importance = dict(zip(features.columns, self.model.feature_importances_))
+            top_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:10]
+            print("Top 10 important features:")
+            for feature, importance in top_features:
+                print(f"  {feature}: {importance:.4f}")
+            
+            self.feature_columns = list(features.columns)
+            self._trained = True
+            return True
+            
+        except Exception as e:
+            print(f"Error training Random Forest model: {e}")
+            return False
+    
+    def predict(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Generate Random Forest prediction."""
+        if not HAS_SKLEARN_EXTRA:
+            return self._unavailable_prediction("sklearn not available")
+            
+        if not self._trained or self.model is None:
+            return self._default_prediction()
+        
+        try:
+            # Prepare features
+            features, _ = self.prepare_features(data)
+            
+            if len(features) == 0:
+                return self._default_prediction()
+            
+            # Use last row for prediction
+            last_features = features.tail(1)[self.feature_columns].fillna(0)
+            features_scaled = self.feature_scaler.transform(last_features)
+            
+            # Predict
+            probabilities = self.model.predict_proba(features_scaled)[0]
+            predicted_class = np.argmax(probabilities)
+            confidence = np.max(probabilities)
+            
+            # Map class to direction
+            class_to_direction = {0: 'SELL', 1: 'HOLD', 2: 'BUY'}
+            direction = class_to_direction[predicted_class]
+            
+            # Apply confidence threshold
+            if confidence < 0.55:
+                direction = 'HOLD'
+                confidence = probabilities[1]
+            
+            return {
+                'direction': direction,
+                'confidence': float(confidence),
+                'probability': float(confidence),
+                'model_name': 'RandomForest',
+                'timestamp': datetime.now(),
+                'features_used': self.feature_columns or [],
+                'class_probabilities': {
+                    'SELL': float(probabilities[0]),
+                    'HOLD': float(probabilities[1]),
+                    'BUY': float(probabilities[2])
+                }
+            }
+            
+        except Exception as e:
+            print(f"Error making Random Forest prediction: {e}")
+            return self._default_prediction()
+    
+    def save(self) -> bool:
+        """Save Random Forest model."""
+        try:
+            os.makedirs('model', exist_ok=True)
+            model_path = self.get_model_path('.pkl')
+            scaler_path = self.get_model_path('_scaler.pkl')
+            
+            joblib.dump(self.model, model_path)
+            if self.feature_scaler:
+                joblib.dump(self.feature_scaler, scaler_path)
+            
+            # Save feature columns
+            feature_path = self.get_model_path('_features.pkl')
+            joblib.dump(self.feature_columns, feature_path)
+            
+            print(f"Random Forest model saved to {model_path}")
+            return True
+        except Exception as e:
+            print(f"Error saving Random Forest model: {e}")
+            return False
+    
+    def load(self) -> bool:
+        """Load Random Forest model."""
+        try:
+            model_path = self.get_model_path('.pkl')
+            scaler_path = self.get_model_path('_scaler.pkl')
+            feature_path = self.get_model_path('_features.pkl')
+            
+            if not os.path.exists(model_path):
+                print(f"Random Forest model file not found: {model_path}")
+                return False
+            
+            self.model = joblib.load(model_path)
+            
+            if os.path.exists(scaler_path):
+                self.feature_scaler = joblib.load(scaler_path)
+            
+            if os.path.exists(feature_path):
+                self.feature_columns = joblib.load(feature_path)
+            
+            self._trained = True
+            print(f"Random Forest model loaded from {model_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading Random Forest model: {e}")
+            return False
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return Random Forest model information."""
+        return {
+            'name': 'RandomForest',
+            'type': 'ensemble_tree',
+            'symbol': self.symbol,
+            'timeframe': self.timeframe,
+            'trained': self._trained,
+            'features': self.feature_columns or [],
+            'available': HAS_SKLEARN_EXTRA
+        }
+    
+    def _unavailable_prediction(self, reason: str) -> Dict[str, Any]:
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'RandomForest',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': reason
+        }
+    
+    def _default_prediction(self) -> Dict[str, Any]:
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'RandomForest',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': 'Model not trained or unavailable'
+        }
+
+
+class SVMModel(BaseModel):
+    """Support Vector Machine model for ensemble diversity."""
+    
+    def __init__(self, symbol: str, timeframe: str):
+        super().__init__(symbol, timeframe)
+        self.feature_columns = None
+        self.feature_scaler = None
+        if not HAS_SKLEARN_EXTRA:
+            print(f"Warning: sklearn not available, SVM model for {symbol} {timeframe} will not function")
+    
+    def prepare_features(self, data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+        """Prepare features for SVM training."""
+        from .advanced_features import AdvancedDataPipeline
+        from .advanced_indicators import EnhancedIndicators
+        
+        # Apply advanced feature engineering
+        feature_pipeline = AdvancedDataPipeline(self.timeframe.replace('m', 'min'))
+        enhanced_data = feature_pipeline.transform(data.copy())
+        
+        # Apply enhanced indicators
+        indicator_calculator = EnhancedIndicators()
+        enhanced_data = indicator_calculator.add_all_indicators(enhanced_data)
+        
+        # Prepare target variable (multi-class)
+        future_returns = enhanced_data['close'].pct_change(periods=5).shift(-5)
+        
+        buy_threshold = 0.002
+        sell_threshold = -0.002
+        
+        targets = pd.Series(index=enhanced_data.index, data=1)  # Default to HOLD
+        targets[future_returns > buy_threshold] = 2   # BUY
+        targets[future_returns < sell_threshold] = 0  # SELL
+        
+        # Select most relevant features (SVM works better with fewer features)
+        exclude_cols = ['datetime', 'close'] if 'datetime' in enhanced_data.columns else ['close']
+        feature_columns = [col for col in enhanced_data.columns 
+                          if col not in exclude_cols and enhanced_data[col].dtype in ['float64', 'int64']]
+        
+        # Select top features based on correlation with price changes
+        price_changes = enhanced_data['close'].pct_change()
+        feature_correlations = {}
+        
+        for col in feature_columns:
+            corr = enhanced_data[col].corr(price_changes)
+            if not np.isnan(corr):
+                feature_correlations[col] = abs(corr)
+        
+        # Select top 20 features
+        top_features = sorted(feature_correlations.items(), key=lambda x: x[1], reverse=True)[:20]
+        selected_features = [f[0] for f in top_features]
+        
+        features = enhanced_data[selected_features].fillna(0)
+        
+        return features, targets
+    
+    def train(self, data: pd.DataFrame) -> bool:
+        """Train SVM model."""
+        if not HAS_SKLEARN_EXTRA:
+            print("Cannot train SVM model: sklearn not available")
+            return False
+            
+        try:
+            print(f"Training SVM model for {self.symbol} timeframe {self.timeframe}...")
+            
+            # Prepare features
+            features, targets = self.prepare_features(data)
+            
+            # Remove rows with NaN targets
+            valid_mask = ~targets.isna()
+            features = features[valid_mask]
+            targets = targets[valid_mask]
+            
+            if len(features) < 50:
+                print(f"Insufficient data for SVM training: {len(features)} samples")
+                return False
+            
+            print(f"Training with {len(features)} samples and {features.shape[1]} features")
+            
+            # Feature scaling (crucial for SVM)
+            self.feature_scaler = StandardScaler()
+            features_scaled = self.feature_scaler.fit_transform(features)
+            
+            # Train-test split (temporal)
+            train_size = int(0.8 * len(features))
+            X_train, X_test = features_scaled[:train_size], features_scaled[train_size:]
+            y_train, y_test = targets[:train_size], targets[train_size:]
+            
+            # Train SVM with RBF kernel
+            self.model = SVC(
+                kernel='rbf',
+                C=1.0,
+                gamma='scale',
+                probability=True,  # Enable probability estimates
+                random_state=42
+            )
+            
+            self.model.fit(X_train, y_train)
+            
+            # Evaluate
+            train_accuracy = self.model.score(X_train, y_train)
+            test_accuracy = self.model.score(X_test, y_test)
+            
+            print(f"SVM training completed.")
+            print(f"Training accuracy: {train_accuracy:.4f}")
+            print(f"Testing accuracy: {test_accuracy:.4f}")
+            
+            self.feature_columns = list(features.columns)
+            self._trained = True
+            return True
+            
+        except Exception as e:
+            print(f"Error training SVM model: {e}")
+            return False
+    
+    def predict(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Generate SVM prediction."""
+        if not HAS_SKLEARN_EXTRA:
+            return self._unavailable_prediction("sklearn not available")
+            
+        if not self._trained or self.model is None:
+            return self._default_prediction()
+        
+        try:
+            # Prepare features
+            features, _ = self.prepare_features(data)
+            
+            if len(features) == 0:
+                return self._default_prediction()
+            
+            # Use last row for prediction
+            last_features = features.tail(1)[self.feature_columns].fillna(0)
+            features_scaled = self.feature_scaler.transform(last_features)
+            
+            # Predict
+            probabilities = self.model.predict_proba(features_scaled)[0]
+            predicted_class = np.argmax(probabilities)
+            confidence = np.max(probabilities)
+            
+            # Map class to direction
+            class_to_direction = {0: 'SELL', 1: 'HOLD', 2: 'BUY'}
+            direction = class_to_direction[predicted_class]
+            
+            # Apply confidence threshold
+            if confidence < 0.6:
+                direction = 'HOLD'
+                confidence = probabilities[1]
+            
+            return {
+                'direction': direction,
+                'confidence': float(confidence),
+                'probability': float(confidence),
+                'model_name': 'SVM',
+                'timestamp': datetime.now(),
+                'features_used': self.feature_columns or [],
+                'class_probabilities': {
+                    'SELL': float(probabilities[0]),
+                    'HOLD': float(probabilities[1]),
+                    'BUY': float(probabilities[2])
+                }
+            }
+            
+        except Exception as e:
+            print(f"Error making SVM prediction: {e}")
+            return self._default_prediction()
+    
+    def save(self) -> bool:
+        """Save SVM model."""
+        try:
+            os.makedirs('model', exist_ok=True)
+            model_path = self.get_model_path('.pkl')
+            scaler_path = self.get_model_path('_scaler.pkl')
+            
+            joblib.dump(self.model, model_path)
+            if self.feature_scaler:
+                joblib.dump(self.feature_scaler, scaler_path)
+            
+            # Save feature columns
+            feature_path = self.get_model_path('_features.pkl')
+            joblib.dump(self.feature_columns, feature_path)
+            
+            print(f"SVM model saved to {model_path}")
+            return True
+        except Exception as e:
+            print(f"Error saving SVM model: {e}")
+            return False
+    
+    def load(self) -> bool:
+        """Load SVM model."""
+        try:
+            model_path = self.get_model_path('.pkl')
+            scaler_path = self.get_model_path('_scaler.pkl')
+            feature_path = self.get_model_path('_features.pkl')
+            
+            if not os.path.exists(model_path):
+                print(f"SVM model file not found: {model_path}")
+                return False
+            
+            self.model = joblib.load(model_path)
+            
+            if os.path.exists(scaler_path):
+                self.feature_scaler = joblib.load(scaler_path)
+            
+            if os.path.exists(feature_path):
+                self.feature_columns = joblib.load(feature_path)
+            
+            self._trained = True
+            print(f"SVM model loaded from {model_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error loading SVM model: {e}")
+            return False
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return SVM model information."""
+        return {
+            'name': 'SVM',
+            'type': 'support_vector_machine',
+            'symbol': self.symbol,
+            'timeframe': self.timeframe,
+            'trained': self._trained,
+            'features': self.feature_columns or [],
+            'available': HAS_SKLEARN_EXTRA
+        }
+    
+    def _unavailable_prediction(self, reason: str) -> Dict[str, Any]:
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'SVM',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': reason
+        }
+    
+    def _default_prediction(self) -> Dict[str, Any]:
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'SVM',
             'timestamp': datetime.now(),
             'features_used': [],
             'error': 'Model not trained or unavailable'

@@ -12,6 +12,15 @@ import json
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
+# Import dependency manager for robust dependency handling
+try:
+    from utils.dependency_manager import dependency_manager, is_available
+    DEPENDENCY_MANAGER_AVAILABLE = True
+except ImportError:
+    # Fallback for systems without dependency manager
+    DEPENDENCY_MANAGER_AVAILABLE = False
+    print("Warning: Dependency manager not available, using legacy imports")
+
 # Import technical indicators
 try:
     from utils.indicators import add_indicators
@@ -20,35 +29,55 @@ except ImportError:
     INDICATORS_AVAILABLE = False
     print("Warning: Technical indicators utility not available")
 
-# Try to import TensorFlow, handle gracefully if not available
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential, Model, load_model
-    from tensorflow.keras.layers import (Dense, LSTM, Dropout, BatchNormalization, 
-                                       Input, MultiHeadAttention, LayerNormalization,
-                                       Add, GlobalAveragePooling1D, Concatenate)
-    from tensorflow.keras.callbacks import EarlyStopping
-    from sklearn.preprocessing import MinMaxScaler
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-    print("Warning: TensorFlow not available, LSTM model will be disabled")
+# Import dependencies with centralized checking
+if DEPENDENCY_MANAGER_AVAILABLE:
+    TENSORFLOW_AVAILABLE = is_available('tensorflow')
+    LIGHTGBM_AVAILABLE = is_available('lightgbm')
+    XGBOOST_AVAILABLE = is_available('xgboost')
+    
+    if TENSORFLOW_AVAILABLE:
+        import tensorflow as tf
+        from tensorflow.keras.models import Sequential, Model, load_model
+        from tensorflow.keras.layers import (Dense, LSTM, Dropout, BatchNormalization, 
+                                           Input, MultiHeadAttention, LayerNormalization,
+                                           Add, GlobalAveragePooling1D, Concatenate)
+        from tensorflow.keras.callbacks import EarlyStopping
+        from sklearn.preprocessing import MinMaxScaler
+    
+    if LIGHTGBM_AVAILABLE:
+        import lightgbm as lgb
+    
+    if XGBOOST_AVAILABLE:
+        import xgboost as xgb
+        
+else:
+    # Legacy import handling with try/except blocks
+    try:
+        import tensorflow as tf
+        from tensorflow.keras.models import Sequential, Model, load_model
+        from tensorflow.keras.layers import (Dense, LSTM, Dropout, BatchNormalization, 
+                                           Input, MultiHeadAttention, LayerNormalization,
+                                           Add, GlobalAveragePooling1D, Concatenate)
+        from tensorflow.keras.callbacks import EarlyStopping
+        from sklearn.preprocessing import MinMaxScaler
+        TENSORFLOW_AVAILABLE = True
+    except ImportError:
+        TENSORFLOW_AVAILABLE = False
+        print("Warning: TensorFlow not available, LSTM model will be disabled")
 
-# Try to import LightGBM, handle gracefully if not available  
-try:
-    import lightgbm as lgb
-    LIGHTGBM_AVAILABLE = True
-except ImportError:
-    LIGHTGBM_AVAILABLE = False
-    print("Warning: LightGBM not available, LightGBM model will be disabled")
+    try:
+        import lightgbm as lgb
+        LIGHTGBM_AVAILABLE = True
+    except ImportError:
+        LIGHTGBM_AVAILABLE = False
+        print("Warning: LightGBM not available, LightGBM model will be disabled")
 
-# Try to import XGBoost, handle gracefully if not available
-try:
-    import xgboost as xgb
-    XGBOOST_AVAILABLE = True
-except ImportError:
-    XGBOOST_AVAILABLE = False
-    print("Warning: XGBoost not available, XGBoost model will be disabled")
+    try:
+        import xgboost as xgb
+        XGBOOST_AVAILABLE = True
+    except ImportError:
+        XGBOOST_AVAILABLE = False
+        print("Warning: XGBoost not available, XGBoost model will be disabled")
 
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
@@ -1082,14 +1111,22 @@ class XGBoostModel(BaseModel):
 
 
 # Additional ML Models for Advanced Ensemble
-
-try:
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.svm import SVC
-    from sklearn.preprocessing import StandardScaler
-    HAS_SKLEARN_EXTRA = True
-except ImportError:
-    HAS_SKLEARN_EXTRA = False
+if DEPENDENCY_MANAGER_AVAILABLE:
+    HAS_SKLEARN_EXTRA = is_available('sklearn')
+    
+    if HAS_SKLEARN_EXTRA:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.svm import SVC
+        from sklearn.preprocessing import StandardScaler
+else:
+    # Legacy sklearn import handling
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.svm import SVC
+        from sklearn.preprocessing import StandardScaler
+        HAS_SKLEARN_EXTRA = True
+    except ImportError:
+        HAS_SKLEARN_EXTRA = False
 
 
 class RandomForestModel(BaseModel):

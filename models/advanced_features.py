@@ -11,22 +11,45 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try to import technical analysis libraries
+# Import dependency manager for robust dependency handling
 try:
-    from scipy import stats
-    from scipy.signal import find_peaks
-    HAS_SCIPY = True
+    from utils.dependency_manager import dependency_manager, FallbackImplementations
+    from utils.dependency_manager import is_available, require_dependency, with_fallback
+    DEPENDENCY_MANAGER_AVAILABLE = True
 except ImportError:
-    HAS_SCIPY = False
-    print("Warning: scipy not available, some advanced features will be disabled")
+    # Fallback for systems without dependency manager
+    DEPENDENCY_MANAGER_AVAILABLE = False
+    print("Warning: Dependency manager not available, using legacy imports")
 
-try:
-    from sklearn.cluster import KMeans
-    from sklearn.preprocessing import StandardScaler
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
-    print("Warning: sklearn not available, some features will be disabled")
+# Import dependencies with fallbacks
+if DEPENDENCY_MANAGER_AVAILABLE:
+    HAS_SCIPY = is_available('scipy')
+    HAS_SKLEARN = is_available('sklearn')
+    
+    if HAS_SCIPY:
+        from scipy import stats
+        from scipy.signal import find_peaks
+    
+    if HAS_SKLEARN:
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import StandardScaler
+else:
+    # Legacy import handling
+    try:
+        from scipy import stats
+        from scipy.signal import find_peaks
+        HAS_SCIPY = True
+    except ImportError:
+        HAS_SCIPY = False
+        print("Warning: scipy not available, some advanced features will be disabled")
+
+    try:
+        from sklearn.cluster import KMeans
+        from sklearn.preprocessing import StandardScaler
+        HAS_SKLEARN = True
+    except ImportError:
+        HAS_SKLEARN = False
+        print("Warning: sklearn not available, some features will be disabled")
 
 
 class MultiTimeframeFeatures:
@@ -78,10 +101,20 @@ class MultiTimeframeFeatures:
         x = np.arange(len(close_prices))
         
         try:
-            slope, intercept, r_value, _, _ = stats.linregress(x, close_prices)
+            if HAS_SCIPY:
+                slope, intercept, r_value, _, _ = stats.linregress(x, close_prices)
+            elif DEPENDENCY_MANAGER_AVAILABLE:
+                # Use fallback implementation
+                slope, intercept, r_value, _, _ = FallbackImplementations.simple_linear_regression(x, close_prices)
+            else:
+                # Manual calculation fallback
+                slope, intercept, r_value = self._manual_linear_regression(x, close_prices)
+            
             trend_strength = abs(r_value)  # Correlation coefficient magnitude
             trend_direction = 1 if slope > 0 else -1 if slope < 0 else 0
-        except:
+            
+        except Exception as e:
+            print(f"Warning: Error calculating trend features: {e}")
             trend_strength = 0.0
             trend_direction = 0.0
         
@@ -89,6 +122,40 @@ class MultiTimeframeFeatures:
             'trend_strength': trend_strength,
             'trend_direction': trend_direction
         }
+    
+    def _manual_linear_regression(self, x, y):
+        """Manual linear regression calculation as ultimate fallback."""
+        x = np.array(x)
+        y = np.array(y)
+        
+        n = len(x)
+        if n < 2:
+            return 0, np.mean(y) if len(y) > 0 else 0, 0
+        
+        mean_x = np.mean(x)
+        mean_y = np.mean(y)
+        
+        # Calculate slope
+        numerator = np.sum((x - mean_x) * (y - mean_y))
+        denominator = np.sum((x - mean_x) ** 2)
+        
+        if denominator == 0:
+            slope = 0
+        else:
+            slope = numerator / denominator
+        
+        # Calculate intercept
+        intercept = mean_y - slope * mean_x
+        
+        # Calculate correlation coefficient
+        if np.std(x) == 0 or np.std(y) == 0:
+            r_value = 0
+        else:
+            r_value = np.corrcoef(x, y)[0, 1]
+            if np.isnan(r_value):
+                r_value = 0
+        
+        return slope, intercept, r_value
     
     def add_multi_timeframe_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Add multi-timeframe trend features to the base data."""
@@ -198,14 +265,19 @@ class SupportResistanceLevels:
     def find_swing_points(self, data: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Find swing highs and lows using peak detection."""
         if not HAS_SCIPY:
-            # Fallback: simple local maxima/minima
-            highs = data['high'].rolling(window=5, center=True).max() == data['high']
-            lows = data['low'].rolling(window=5, center=True).min() == data['low']
-            return highs.values, lows.values
-        
-        # Use scipy for more sophisticated peak detection
-        high_peaks, _ = find_peaks(data['high'].values, distance=5)
-        low_peaks, _ = find_peaks(-data['low'].values, distance=5)
+            if DEPENDENCY_MANAGER_AVAILABLE:
+                # Use fallback implementation
+                high_peaks, _ = FallbackImplementations.simple_peak_detection(data['high'].values, distance=5)
+                low_peaks, _ = FallbackImplementations.simple_peak_detection(-data['low'].values, distance=5)
+            else:
+                # Simple local maxima/minima fallback
+                highs = data['high'].rolling(window=5, center=True).max() == data['high']
+                lows = data['low'].rolling(window=5, center=True).min() == data['low']
+                return highs.values, lows.values
+        else:
+            # Use scipy for more sophisticated peak detection
+            high_peaks, _ = find_peaks(data['high'].values, distance=5)
+            low_peaks, _ = find_peaks(-data['low'].values, distance=5)
         
         # Convert to boolean arrays
         highs = np.zeros(len(data), dtype=bool)
@@ -248,8 +320,8 @@ class SupportResistanceLevels:
                                 'touches': touches,
                                 'strength': min(touches / 5.0, 1.0)
                             })
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Warning: K-means clustering failed: {e}")
             
             # Support levels from swing lows
             if len(swing_lows) >= self.min_touches:
@@ -267,8 +339,41 @@ class SupportResistanceLevels:
                                 'touches': touches,
                                 'strength': min(touches / 5.0, 1.0)
                             })
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Warning: K-means clustering failed: {e}")
+        
+        elif DEPENDENCY_MANAGER_AVAILABLE and len(swing_highs) > 0:
+            # Use fallback clustering implementation
+            try:
+                # Resistance levels from swing highs
+                if len(swing_highs) >= self.min_touches:
+                    cluster_result = FallbackImplementations.simple_kmeans(swing_highs, n_clusters=min(3, len(swing_highs)))
+                    for i, center in enumerate(cluster_result['cluster_centers_']):
+                        level_price = center[0]
+                        touches = cluster_result['labels_'].count(i)
+                        if touches >= self.min_touches:
+                            levels.append({
+                                'type': 'resistance',
+                                'price': level_price,
+                                'touches': touches,
+                                'strength': min(touches / 5.0, 1.0)
+                            })
+                
+                # Support levels from swing lows
+                if len(swing_lows) >= self.min_touches:
+                    cluster_result = FallbackImplementations.simple_kmeans(swing_lows, n_clusters=min(3, len(swing_lows)))
+                    for i, center in enumerate(cluster_result['cluster_centers_']):
+                        level_price = center[0]
+                        touches = cluster_result['labels_'].count(i)
+                        if touches >= self.min_touches:
+                            levels.append({
+                                'type': 'support',
+                                'price': level_price,
+                                'touches': touches,
+                                'strength': min(touches / 5.0, 1.0)
+                            })
+            except Exception as e:
+                print(f"Warning: Fallback clustering failed: {e}")
         
         return levels
     

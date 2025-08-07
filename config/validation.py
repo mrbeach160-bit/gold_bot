@@ -443,7 +443,7 @@ class EnhancedConfigValidator:
         """Validate API key format (backward compatibility)."""
         return self._validate_api_key(api_key or "", source)
     
-    def validate_trading_symbol(self, symbol: str) -> bool:
+    def validate_trading_symbol(self, symbol: str, name: str = None) -> bool:
         """Validate trading symbol format."""
         if not symbol or not symbol.strip():
             self.result.add_error("Trading symbol cannot be empty")
@@ -466,7 +466,7 @@ class EnhancedConfigValidator:
         
         return True
     
-    def validate_timeframe(self, timeframe: str) -> bool:
+    def validate_timeframe(self, timeframe: str, name: str = None) -> bool:
         """Validate timeframe format."""
         valid_timeframes = [
             "1min", "5min", "15min", "30min", "1h", "4h", "1day",
@@ -613,6 +613,17 @@ def get_configuration_report() -> Dict[str, Any]:
         report['recommendations'].append("Fix configuration errors before running in production")
     
     return report
+
+
+# Additional validation methods that were orphaned but should be in a validator class
+class ConfigValidator:
+    """Basic configuration validator for backward compatibility."""
+    
+    def __init__(self):
+        self.errors = []
+        self.warnings = []
+    
+    def validate_api_key_format(self, api_key: str, source: str) -> bool:
         """
         Validate API key format.
         

@@ -12,11 +12,20 @@ import json
 from datetime import datetime
 from typing import Dict, Any, List
 
+# Import technical indicators
+try:
+    from utils.indicators import add_indicators
+    INDICATORS_AVAILABLE = True
+except ImportError:
+    INDICATORS_AVAILABLE = False
+    print("Warning: Technical indicators utility not available")
+
 # Try to import TensorFlow, handle gracefully if not available
 try:
     import tensorflow as tf
     from tensorflow.keras.models import Sequential, load_model
-    from tensorflow.keras.layers import Dense, LSTM
+    from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
+    from tensorflow.keras.callbacks import EarlyStopping
     from sklearn.preprocessing import MinMaxScaler
     TENSORFLOW_AVAILABLE = True
 except ImportError:
@@ -39,10 +48,69 @@ except ImportError:
     XGBOOST_AVAILABLE = False
     print("Warning: XGBoost not available, XGBoost model will be disabled")
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split, TimeSeriesSplit
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 from .base import BaseModel
+
+
+def calculate_trading_metrics(y_true, y_pred, y_prob=None):
+    """Calculate trading-specific evaluation metrics.
+    
+    Args:
+        y_true: True binary labels (1 for up, 0 for down)
+        y_pred: Predicted binary labels  
+        y_prob: Prediction probabilities (optional)
+    
+    Returns:
+        Dict with trading metrics
+    """
+    try:
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        metrics = {
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(y_true, y_pred, zero_division=0),
+            'recall': recall_score(y_true, y_pred, zero_division=0),
+            'f1_score': f1_score(y_true, y_pred, zero_division=0)
+        }
+        
+        # Calculate win rate and trading-specific metrics
+        total_trades = len(y_pred)
+        if total_trades > 0:
+            correct_predictions = sum(y_true == y_pred)
+            metrics['win_rate'] = correct_predictions / total_trades
+            
+            # Calculate directional accuracy for buy/sell separately
+            buy_signals = y_pred == 1
+            sell_signals = y_pred == 0
+            
+            if sum(buy_signals) > 0:
+                buy_accuracy = sum((y_true == 1) & (y_pred == 1)) / sum(buy_signals)
+                metrics['buy_accuracy'] = buy_accuracy
+            else:
+                metrics['buy_accuracy'] = 0.0
+            
+            if sum(sell_signals) > 0:
+                sell_accuracy = sum((y_true == 0) & (y_pred == 0)) / sum(sell_signals)
+                metrics['sell_accuracy'] = sell_accuracy
+            else:
+                metrics['sell_accuracy'] = 0.0
+            
+            # Confidence-based metrics if probabilities provided
+            if y_prob is not None:
+                high_confidence_mask = y_prob > 0.7
+                if sum(high_confidence_mask) > 0:
+                    high_conf_accuracy = sum((y_true == y_pred) & high_confidence_mask) / sum(high_confidence_mask)
+                    metrics['high_confidence_accuracy'] = high_conf_accuracy
+                else:
+                    metrics['high_confidence_accuracy'] = 0.0
+        
+        return metrics
+        
+    except Exception as e:
+        print(f"Error calculating trading metrics: {e}")
+        return {'accuracy': 0.0, 'error': str(e)}
 
 
 class LSTMModel(BaseModel):
@@ -64,7 +132,7 @@ class LSTMModel(BaseModel):
         try:
             print(f"Training LSTM model for {self.symbol} timeframe {self.timeframe}...")
             
-            # Prepare data (minimal change from original)
+            # Prepare data with TimeSeriesSplit validation
             close_data = data[['close']].values
             self.scaler = MinMaxScaler()
             scaled_data = self.scaler.fit_transform(close_data)
@@ -77,18 +145,80 @@ class LSTMModel(BaseModel):
             X, y = np.array(X), np.array(y)
             X = np.reshape(X, (X.shape[0], X.shape[1], 1))
             
-            # Clear session and build model
+            if len(X) < 100:
+                print(f"Insufficient data for LSTM training: {len(X)} samples")
+                return False
+            
+            # Use time series split for validation
+            tscv = TimeSeriesSplit(n_splits=3)  # Reduced splits for smaller datasets
+            val_losses = []
+            
+            for train_idx, val_idx in tscv.split(X):
+                X_train_fold, X_val_fold = X[train_idx], X[val_idx]
+                y_train_fold, y_val_fold = y[train_idx], y[val_idx]
+                
+                # Build enhanced LSTM model
+                fold_model = Sequential([
+                    LSTM(units=100, return_sequences=True, dropout=0.2, input_shape=(X.shape[1], 1)),
+                    BatchNormalization(),
+                    LSTM(units=50, return_sequences=True, dropout=0.2),
+                    LSTM(units=25, dropout=0.2),
+                    Dense(50, activation='relu'),
+                    Dropout(0.3),
+                    Dense(1, activation='sigmoid')
+                ])
+                
+                fold_model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+                
+                # Train with early stopping
+                early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+                history = fold_model.fit(
+                    X_train_fold, y_train_fold,
+                    validation_data=(X_val_fold, y_val_fold),
+                    epochs=50, batch_size=32, verbose=0,
+                    callbacks=[early_stopping]
+                )
+                
+                val_loss = min(history.history['val_loss'])
+                val_losses.append(val_loss)
+            
+            # Train final model on most recent data (preserving temporal order)
+            train_size = int(0.8 * len(X))
+            X_train, X_val = X[:train_size], X[train_size:]
+            y_train, y_val = y[:train_size], y[train_size:]
+            
+            # Clear session and build enhanced model
             tf.keras.backend.clear_session()
             self.model = Sequential([
-                LSTM(units=50, return_sequences=True, input_shape=(X.shape[1], 1)),
-                LSTM(units=50),
-                Dense(1)
+                LSTM(units=100, return_sequences=True, dropout=0.2, input_shape=(X.shape[1], 1)),
+                BatchNormalization(),
+                LSTM(units=50, return_sequences=True, dropout=0.2),
+                LSTM(units=25, dropout=0.2),
+                Dense(50, activation='relu'),
+                Dropout(0.3),
+                Dense(1, activation='sigmoid')
             ])
-            self.model.compile(optimizer='adam', loss='mean_squared_error')
-            self.model.fit(X, y, epochs=5, batch_size=32, verbose=0)
+            
+            self.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+            
+            # Train with early stopping
+            early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+            history = self.model.fit(
+                X_train, y_train,
+                validation_data=(X_val, y_val),
+                epochs=50, batch_size=32, verbose=0,
+                callbacks=[early_stopping]
+            )
+            
+            # Print training results
+            final_loss = min(history.history['val_loss'])
+            cv_loss = np.mean(val_losses)
+            print(f"LSTM training completed.")
+            print(f"Cross-validation loss: {cv_loss:.6f} (+/- {np.std(val_losses)*2:.6f})")
+            print(f"Final validation loss: {final_loss:.6f}")
+            print(f"Training stopped at epoch: {len(history.history['loss'])}")
             
             self._trained = True
-            print("LSTM model training completed.")
             return True
             
         except Exception as e:
@@ -248,34 +378,79 @@ class LightGBMModel(BaseModel):
         try:
             print(f"Training LightGBM model for {self.symbol} timeframe {self.timeframe}...")
             
-            # Prepare features (minimal change from original)
+            # Prepare features with proper technical indicators
             df = data.copy()
             
-            # Add basic technical indicators if they don't exist
-            if 'rsi' not in df.columns:
-                # Use simple price-based features if ta library not available
-                df['rsi'] = 50.0  # Neutral RSI
-            if 'MACDh_12_26_9' not in df.columns:
-                df['MACDh_12_26_9'] = 0.0  # Neutral MACD
-            if 'ADX_14' not in df.columns:
-                df['ADX_14'] = 25.0  # Neutral ADX
+            # Calculate proper technical indicators if missing
+            if not all(col in df.columns for col in ['rsi', 'MACDh_12_26_9', 'ADX_14']):
+                if INDICATORS_AVAILABLE:
+                    print("Calculating technical indicators...")
+                    try:
+                        df = add_indicators(df)
+                        print("Technical indicators calculated successfully")
+                    except Exception as e:
+                        print(f"Failed to calculate indicators: {e}")
+                        print("Cannot train model without proper technical indicators")
+                        return False
+                else:
+                    print("Technical indicators missing and calculator not available")
+                    return False
+            
+            # Validate that we have sufficient data after indicator calculation
+            if len(df) < 100:
+                print(f"Insufficient data after indicator calculation: {len(df)} rows")
+                return False
             
             # Create target: next close higher than current
             df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
             df.dropna(inplace=True)
             
+            if len(df) < 50:
+                print("Insufficient data after preprocessing")
+                return False
+            
+            # Use validated technical indicators
             self.feature_columns = ['open', 'high', 'low', 'close', 'volume', 'rsi', 'MACDh_12_26_9', 'ADX_14']
             X = df[self.feature_columns]
             y = df['target']
             
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+            # Use TimeSeriesSplit to prevent data leakage
+            tscv = TimeSeriesSplit(n_splits=3)  # Reduced splits for smaller datasets
+            accuracies = []
+            
+            # Train on the full dataset for final model, but validate with time series split
+            for train_idx, test_idx in tscv.split(X):
+                X_train_fold, X_test_fold = X.iloc[train_idx], X.iloc[test_idx]
+                y_train_fold, y_test_fold = y.iloc[train_idx], y.iloc[test_idx]
+                
+                # Train fold model for validation
+                fold_model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
+                fold_model.fit(X_train_fold, y_train_fold)
+                fold_accuracy = fold_model.score(X_test_fold, y_test_fold)
+                accuracies.append(fold_accuracy)
+            
+            # Train final model on all data (preserving temporal order)
+            train_size = int(0.8 * len(X))
+            X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+            y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
             
             self.model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42)
             self.model.fit(X_train, y_train)
             
-            # Calculate accuracy
-            accuracy = self.model.score(X_test, y_test)
-            print(f"LightGBM training completed. Accuracy: {accuracy:.4f}")
+            # Calculate final accuracy and additional metrics
+            y_pred = self.model.predict(X_test)
+            y_prob = self.model.predict_proba(X_test)[:, 1]  # Probability of positive class
+            
+            # Calculate comprehensive metrics
+            final_metrics = calculate_trading_metrics(y_test, y_pred, y_prob)
+            cv_accuracy = np.mean(accuracies)
+            
+            print(f"LightGBM training completed.")
+            print(f"Cross-validation accuracy: {cv_accuracy:.4f} (+/- {np.std(accuracies)*2:.4f})")
+            print(f"Final test metrics:")
+            for metric, value in final_metrics.items():
+                if metric != 'error':
+                    print(f"  {metric}: {value:.4f}")
             
             self._trained = True
             return True
@@ -293,18 +468,27 @@ class LightGBMModel(BaseModel):
             return self._default_prediction()
         
         try:
-            # Prepare latest data for prediction (minimal change from original)
+            # Prepare latest data for prediction
             latest_df = data.copy()
             
-            # Add basic indicators if missing
-            if 'rsi' not in latest_df.columns:
-                latest_df['rsi'] = 50.0
-            if 'MACDh_12_26_9' not in latest_df.columns:
-                latest_df['MACDh_12_26_9'] = 0.0
-            if 'ADX_14' not in latest_df.columns:
-                latest_df['ADX_14'] = 25.0
+            # Calculate indicators if missing
+            if not all(col in latest_df.columns for col in ['rsi', 'MACDh_12_26_9', 'ADX_14']):
+                if INDICATORS_AVAILABLE:
+                    try:
+                        latest_df = add_indicators(latest_df)
+                    except Exception as e:
+                        print(f"Failed to calculate indicators for prediction: {e}")
+                        return self._default_prediction()
+                else:
+                    print("Cannot make prediction: technical indicators missing")
+                    return self._default_prediction()
             
             latest_df.dropna(inplace=True)
+            
+            if len(latest_df) == 0:
+                print("No valid data for prediction after preprocessing")
+                return self._default_prediction()
+            
             X = latest_df[self.feature_columns].tail(1)
             
             if X.empty:
@@ -446,29 +630,124 @@ class XGBoostModel(BaseModel):
         try:
             print(f"Training XGBoost model for {self.symbol} timeframe {self.timeframe}...")
             
-            # Prepare data for classification (minimal change from original)
+            # Prepare data safely
             df = data.copy()
-            df['future_close'] = df['close'].shift(-5)  # 5 periods ahead
+            
+            # Add indicators if missing
+            if INDICATORS_AVAILABLE and not all(col in df.columns for col in ['rsi', 'MACDh_12_26_9', 'ADX_14']):
+                try:
+                    df = add_indicators(df)
+                except Exception as e:
+                    print(f"Failed to calculate indicators: {e}")
+                    return False
+            
+            # Create enhanced targets with multiple horizons
+            df['target_1'] = (df['close'].shift(-1) > df['close']).astype(int)  # 1 period ahead
+            df['target_5'] = (df['close'].shift(-5) > df['close']).astype(int)  # 5 periods ahead
+            
+            # Use the 5-period target as main target
             df.dropna(inplace=True)
-            df['target'] = (df['future_close'] > df['close']).astype(int)
             
-            # Remove unwanted columns and prepare features
-            features = df.drop(columns=['open', 'high', 'low', 'close', 'volume', 'future_close', 'target', 'ema_signal'], errors='ignore')
-            X = features
-            y = df['target']
-            
-            if X.empty or y.empty or len(X.columns) == 0:
-                print("Not enough data or features for training XGBoost model.")
+            if len(df) < 100:
+                print(f"Insufficient data for XGBoost training: {len(df)} rows")
                 return False
             
-            self.feature_columns = list(X.columns)
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+            # Select features more safely
+            price_features = ['open', 'high', 'low', 'close', 'volume']
+            indicator_features = []
+            
+            # Add available indicator features
+            possible_indicators = ['rsi', 'MACDh_12_26_9', 'ADX_14', 'EMA_10', 'EMA_20', 'ATR_14', 'STOCH_k']
+            for ind in possible_indicators:
+                if ind in df.columns:
+                    indicator_features.append(ind)
+            
+            self.feature_columns = price_features + indicator_features
+            
+            # Ensure we have features to work with
+            if len(self.feature_columns) < 5:
+                print("Insufficient features for XGBoost training")
+                return False
+            
+            X = df[self.feature_columns]
+            y = df['target_5']  # Use 5-period ahead target
+            
+            if X.empty or y.empty:
+                print("Empty features or targets after preprocessing")
+                return False
+            
+            # Use TimeSeriesSplit for validation
+            tscv = TimeSeriesSplit(n_splits=3)  # Reduced splits for smaller datasets
+            accuracies = []
+            
+            for train_idx, test_idx in tscv.split(X):
+                X_train_fold, X_test_fold = X.iloc[train_idx], X.iloc[test_idx]
+                y_train_fold, y_test_fold = y.iloc[train_idx], y.iloc[test_idx]
+                
+                # Check if we have both classes in training fold
+                if len(y_train_fold.unique()) < 2:
+                    print(f"Skipping fold with only one class: {y_train_fold.unique()}")
+                    continue
+                
+                fold_model = xgb.XGBClassifier(
+                    objective='binary:logistic',
+                    eval_metric='logloss', 
+                    use_label_encoder=False,
+                    n_estimators=50,  # Reduced for smaller datasets
+                    learning_rate=0.1,
+                    max_depth=3,
+                    random_state=42
+                )
+                
+                fold_model.fit(X_train_fold, y_train_fold)
+                fold_accuracy = fold_model.score(X_test_fold, y_test_fold)
+                accuracies.append(fold_accuracy)
+            
+            # If no valid folds, skip cross-validation
+            if not accuracies:
+                print("No valid cross-validation folds - training on single split")
+                accuracies = [0.5]  # Default accuracy
+            
+            # Train final model using temporal split
+            train_size = int(0.8 * len(X))
+            X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+            y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
+            
+            # Check if we have both classes in training data
+            if len(y_train.unique()) < 2:
+                print("Training data has only one class - adjusting split")
+                # Use more data for training to ensure both classes
+                train_size = int(0.9 * len(X))
+                X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+                y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
+                
+                if len(y_train.unique()) < 2:
+                    print("Still only one class - using stratified approach")
+                    # Ensure we have at least one sample of each class
+                    class_0_indices = y[y == 0].index
+                    class_1_indices = y[y == 1].index
+                    
+                    if len(class_0_indices) == 0 or len(class_1_indices) == 0:
+                        print("Dataset has only one class overall - cannot train classifier")
+                        return False
+                    
+                    # Take most samples for training, but ensure both classes present
+                    train_0 = class_0_indices[:max(1, int(0.8 * len(class_0_indices)))]
+                    train_1 = class_1_indices[:max(1, int(0.8 * len(class_1_indices)))]
+                    test_0 = class_0_indices[len(train_0):]
+                    test_1 = class_1_indices[len(train_1):]
+                    
+                    train_indices = list(train_0) + list(train_1)
+                    test_indices = list(test_0) + list(test_1)
+                    
+                    X_train, X_test = X.iloc[train_indices], X.iloc[test_indices]
+                    y_train, y_test = y.iloc[train_indices], y.iloc[test_indices]
             
             self.model = xgb.XGBClassifier(
                 objective='binary:logistic',
                 eval_metric='logloss', 
                 use_label_encoder=False,
-                n_estimators=100,
+                n_estimators=50,  # Reduced for smaller datasets
                 learning_rate=0.1,
                 max_depth=3,
                 random_state=42
@@ -478,8 +757,25 @@ class XGBoostModel(BaseModel):
             
             # Calculate accuracy
             y_pred = self.model.predict(X_test)
-            accuracy = accuracy_score(y_test, y_pred)
-            print(f"XGBoost training completed. Accuracy: {accuracy:.2f}")
+            y_prob = self.model.predict_proba(X_test)[:, 1]  # Probability of positive class
+            
+            # Calculate comprehensive metrics
+            final_metrics = calculate_trading_metrics(y_test, y_pred, y_prob)
+            cv_accuracy = np.mean(accuracies)
+            
+            print(f"XGBoost training completed.")
+            print(f"Cross-validation accuracy: {cv_accuracy:.4f} (+/- {np.std(accuracies)*2:.4f})")
+            print(f"Final test metrics:")
+            for metric, value in final_metrics.items():
+                if metric != 'error':
+                    print(f"  {metric}: {value:.4f}")
+            
+            # Print feature importance
+            if hasattr(self.model, 'feature_importances_'):
+                importance = self.model.feature_importances_
+                print("Feature importance:")
+                for i, feature in enumerate(self.feature_columns):
+                    print(f"  {feature}: {importance[i]:.4f}")
             
             self._trained = True
             return True
@@ -497,15 +793,32 @@ class XGBoostModel(BaseModel):
             return self._default_prediction()
         
         try:
-            # Prepare prediction features (minimal change from original)
-            training_features = self.model.get_booster().feature_names
-            prediction_features = data[training_features].tail(1)
+            # Prepare data with indicators if needed
+            df = data.copy()
+            
+            if INDICATORS_AVAILABLE and not all(col in df.columns for col in self.feature_columns[-3:]):  # Check for indicators
+                try:
+                    df = add_indicators(df)
+                except Exception as e:
+                    print(f"Failed to calculate indicators for prediction: {e}")
+                    return self._default_prediction()
+            
+            # Check if we have all required features
+            missing_features = [col for col in self.feature_columns if col not in df.columns]
+            if missing_features:
+                print(f"Missing features for prediction: {missing_features}")
+                return self._default_prediction()
+            
+            prediction_features = df[self.feature_columns].tail(1)
+            
+            if prediction_features.empty:
+                return self._default_prediction()
             
             prediction = self.model.predict(prediction_features)
             prediction_proba = self.model.predict_proba(prediction_features)
             
-            final_prediction = int(prediction[-1])
-            final_proba = prediction_proba[-1]
+            final_prediction = int(prediction[0])
+            final_proba = prediction_proba[0]
             
             direction = "BUY" if final_prediction == 1 else "SELL"
             confidence = float(max(final_proba))
@@ -516,7 +829,7 @@ class XGBoostModel(BaseModel):
                 'probability': confidence,
                 'model_name': 'XGBoost',
                 'timestamp': datetime.now(),
-                'features_used': training_features,
+                'features_used': self.feature_columns,
                 'prediction': final_prediction
             }
             

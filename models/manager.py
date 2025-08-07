@@ -6,7 +6,7 @@ Centralized model management for loading, training, and prediction coordination.
 import pandas as pd
 import os
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 
 from .base import BaseModel, create_model
@@ -18,14 +18,27 @@ try:
     from config import ConfigManager, ModelConfig
     CONFIG_AVAILABLE = True
 except ImportError:
-    CONFIG_AVAILABLE = False
-    print("Warning: Configuration system not available, using defaults")
+    try:
+        from config.manager import ConfigManager
+        from config.settings import ModelConfig
+        CONFIG_AVAILABLE = True
+    except ImportError:
+        CONFIG_AVAILABLE = False
+        print("Warning: Configuration system not available, using defaults")
+
+# Define ModelConfig for type hints
+if not CONFIG_AVAILABLE:
+    class ModelConfig:
+        def __init__(self):
+            self.models_to_use = ["lstm", "lightgbm", "xgboost"]
+            self.ensemble_method = "meta_learner"
+            self.confidence_threshold = 0.6
 
 
 class ModelManager:
     """Centralized manager for all ML models."""
     
-    def __init__(self, symbol: str, timeframe: str, config: Optional[ModelConfig] = None):
+    def __init__(self, symbol: str, timeframe: str, config: Optional[Union[ModelConfig, Any]] = None):
         """Initialize ModelManager with symbol and timeframe.
         
         Args:

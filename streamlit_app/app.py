@@ -82,7 +82,30 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Import data utilities from utils folder
+# --- PHASE 3: NEW DATA & TRADING SYSTEM INTEGRATION ---
+# Attempt to use new unified data and trading systems from Phase 3
+NEW_SYSTEM_AVAILABLE = False
+try:
+    from data import DataManager
+    from trading import TradingManager
+    NEW_SYSTEM_AVAILABLE = True
+    
+    # Initialize managers if available from main.py globals
+    data_manager = globals().get('data_manager')
+    trading_manager = globals().get('trading_manager')
+    
+    if data_manager is None:
+        data_manager = DataManager()
+    if trading_manager is None:
+        trading_manager = TradingManager(data_manager=data_manager)
+        
+    print("✅ Phase 3 unified systems available")
+except ImportError:
+    print("⚠️ Phase 3 systems not available, using legacy utils")
+    data_manager = None
+    trading_manager = None
+
+# Import data utilities from utils folder (legacy compatibility)
 try:
     from utils.data import get_gold_data # Untuk Twelve Data
     from utils.indicators import add_indicators, get_support_resistance, compute_rsi
@@ -1942,6 +1965,14 @@ def run_backtest(symbol, data, initial_balance, risk_percent, sl_pips, tp_pips, 
 def main():
     st.set_page_config(page_title="Multi-Source Trading AI v8.3", layout="wide")
     st.title("🤖 Multi-Asset Trading Bot (Master AI) v8.3 - Twelve Data WebSocket Enhanced")
+    
+    # Phase 3 System Status
+    if NEW_SYSTEM_AVAILABLE:
+        st.success("🚀 Phase 3 Unified Data & Trading System Active")
+        if data_manager and trading_manager:
+            st.info(f"📊 DataManager: {len(data_manager.providers)} providers | 🎯 TradingManager: {trading_manager.strategy.name}")
+    else:
+        st.info("📦 Using Legacy Utils System")
     
     # WebSocket availability indicator
     if WEBSOCKET_AVAILABLE:

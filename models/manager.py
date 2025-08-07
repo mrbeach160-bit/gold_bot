@@ -10,8 +10,10 @@ from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 
 from .base import BaseModel, create_model
-from .ml_models import LSTMModel, LightGBMModel, XGBoostModel
+from .ml_models import LSTMModel, LightGBMModel, XGBoostModel, RandomForestModel, SVMModel
 from .ensemble import MetaLearner, VotingEnsemble, WeightedVotingEnsemble
+from .advanced_ensemble import DynamicEnsemble, AdvancedMetaLearner
+from .evaluation import ComprehensiveEvaluator
 
 # Try to import config system, fall back to defaults if not available
 try:
@@ -71,9 +73,11 @@ class ModelManager:
         """Create default configuration when config system unavailable."""
         class DefaultModelConfig:
             def __init__(self):
-                self.models_to_use = ["lstm", "lightgbm", "xgboost"]
-                self.ensemble_method = "meta_learner"
+                self.models_to_use = ["lstm", "lightgbm", "xgboost", "randomforest", "svm"]
+                self.ensemble_method = "dynamic_ensemble"
                 self.confidence_threshold = 0.6
+                self.use_advanced_features = True
+                self.enable_regime_detection = True
         
         return DefaultModelConfig()
     
@@ -81,23 +85,38 @@ class ModelManager:
         """Initialize models based on configuration."""
         print(f"Initializing models for {self.symbol} {self.timeframe}")
         
-        # Initialize individual models
+        # Initialize individual models - expanded to include new models
         for model_type in self.config.models_to_use:
-            if model_type.lower() in ['lstm', 'lightgbm', 'lgb', 'xgboost', 'xgb']:
+            if model_type.lower() in ['lstm', 'lightgbm', 'lgb', 'xgboost', 'xgb', 'randomforest', 'rf', 'svm', 'svc']:
                 try:
                     model = create_model(model_type, self.symbol, self.timeframe)
                     self.models[model_type.lower()] = model
                     print(f"Initialized {model_type} model")
                 except Exception as e:
                     print(f"Error initializing {model_type} model: {e}")
-            elif model_type.lower() == 'meta':
-                # Meta learner will be initialized separately
+            elif model_type.lower() in ['meta', 'ensemble', 'dynamic']:
+                # Ensemble models will be initialized separately
                 continue
         
-        # Initialize meta learner if specified
+        # Initialize ensemble models based on configuration
+        ensemble_method = getattr(self.config, 'ensemble_method', 'dynamic_ensemble')
+        
+        if ensemble_method == 'dynamic_ensemble' or 'dynamic' in [m.lower() for m in self.config.models_to_use]:
+            self.ensemble_models['dynamic_ensemble'] = DynamicEnsemble(self.symbol, self.timeframe)
+            print("Initialized Dynamic Ensemble")
+        
+        if ensemble_method == 'advanced_meta' or 'advanced_meta' in [m.lower() for m in self.config.models_to_use]:
+            self.ensemble_models['advanced_meta'] = AdvancedMetaLearner(self.symbol, self.timeframe)
+            print("Initialized Advanced Meta Learner")
+        
+        # Legacy meta learner for backward compatibility
         if 'meta' in [m.lower() for m in self.config.models_to_use]:
             self.ensemble_models['meta'] = MetaLearner(self.symbol, self.timeframe)
             print("Initialized Meta Learner")
+        
+        # Initialize comprehensive evaluator
+        self.evaluator = ComprehensiveEvaluator()
+        print("Initialized Comprehensive Evaluator")
     
     def load_all_models(self) -> bool:
         """Load all available models from disk.
@@ -209,25 +228,47 @@ class ModelManager:
         
         Args:
             data: Input data for prediction
-            method: Ensemble method ('meta_learner', 'voting', 'weighted_voting')
+            method: Ensemble method ('dynamic_ensemble', 'advanced_meta', 'meta_learner', 'voting', 'weighted_voting')
                    Uses config default if not specified
             
         Returns:
             Dict: Ensemble prediction
         """
         if method is None:
-            method = self.config.ensemble_method
+            method = getattr(self.config, 'ensemble_method', 'dynamic_ensemble')
         
         try:
+            # Advanced Dynamic Ensemble (Phase 3)
+            if method == 'dynamic_ensemble' and 'dynamic_ensemble' in self.ensemble_models:
+                dynamic_ensemble = self.ensemble_models['dynamic_ensemble']
+                if dynamic_ensemble.is_trained():
+                    return dynamic_ensemble.predict(data)
+                else:
+                    print("Dynamic ensemble not trained, falling back to advanced meta")
+                    method = 'advanced_meta'
+            
+            # Advanced Meta Learner (Phase 3)
+            if method == 'advanced_meta' and 'advanced_meta' in self.ensemble_models:
+                advanced_meta = self.ensemble_models['advanced_meta']
+                if advanced_meta.is_trained():
+                    # Get individual model predictions for meta learner
+                    individual_preds = self.get_predictions(data)
+                    trained_preds = {k: v for k, v in individual_preds.items() 
+                                   if 'error' not in v and v.get('confidence', 0) > 0}
+                    
+                    if trained_preds:
+                        return advanced_meta.predict(data, trained_preds)
+                    else:
+                        print("No trained models available for advanced meta learner")
+                        method = 'voting'
+                else:
+                    print("Advanced meta learner not trained, falling back to meta learner")
+                    method = 'meta_learner'
+            
+            # Legacy Meta Learner
             if method == 'meta_learner' and 'meta' in self.ensemble_models:
                 meta_learner = self.ensemble_models['meta']
                 if meta_learner.is_trained():
-                    # For meta learner, we need individual model predictions
-                    # This is a simplified version - full implementation would gather all predictions
-                    individual_preds = self.get_predictions(data)
-                    
-                    # Extract predictions in format expected by meta learner
-                    # This is a placeholder - actual implementation would need proper feature engineering
                     return meta_learner.predict(data)
                 else:
                     print("Meta learner not trained, falling back to voting")
@@ -255,6 +296,125 @@ class ModelManager:
         except Exception as e:
             print(f"Error in ensemble prediction: {e}")
             return self._default_ensemble_prediction(str(e))
+    
+    def setup_dynamic_ensemble(self) -> bool:
+        """Set up dynamic ensemble by adding all trained base models."""
+        if 'dynamic_ensemble' not in self.ensemble_models:
+            self.ensemble_models['dynamic_ensemble'] = DynamicEnsemble(self.symbol, self.timeframe)
+        
+        dynamic_ensemble = self.ensemble_models['dynamic_ensemble']
+        
+        # Add all trained base models to the ensemble
+        added_models = 0
+        for model_name, model in self.models.items():
+            if model.is_trained():
+                dynamic_ensemble.add_model(model)
+                added_models += 1
+                print(f"Added {model_name} to dynamic ensemble")
+        
+        if added_models > 0:
+            dynamic_ensemble._trained = True
+            print(f"Dynamic ensemble ready with {added_models} base models")
+            return True
+        else:
+            print("No trained models available for dynamic ensemble")
+            return False
+    
+    def update_ensemble_performance(self, prediction: Dict[str, Any], actual_outcome: str):
+        """Update ensemble performance tracking."""
+        # Update dynamic ensemble performance if available
+        if 'dynamic_ensemble' in self.ensemble_models:
+            dynamic_ensemble = self.ensemble_models['dynamic_ensemble']
+            dynamic_ensemble.update_performance(prediction, actual_outcome)
+    
+    def evaluate_all_models(self, data: pd.DataFrame, comprehensive: bool = True) -> Dict[str, Any]:
+        """Evaluate all models using the comprehensive evaluation framework."""
+        print("Starting comprehensive evaluation of all models...")
+        
+        evaluation_results = {
+            'evaluation_timestamp': datetime.now(),
+            'symbol': self.symbol,
+            'timeframe': self.timeframe,
+            'individual_evaluations': {},
+            'ensemble_evaluations': {},
+            'model_comparison': {}
+        }
+        
+        # Evaluate individual models
+        for model_name, model in self.models.items():
+            if model.is_trained():
+                print(f"Evaluating {model_name}...")
+                try:
+                    eval_result = self.evaluator.evaluate_model(model, data, comprehensive)
+                    evaluation_results['individual_evaluations'][model_name] = eval_result
+                except Exception as e:
+                    print(f"Error evaluating {model_name}: {e}")
+                    evaluation_results['individual_evaluations'][model_name] = {'error': str(e)}
+        
+        # Evaluate ensemble models
+        for ensemble_name, ensemble in self.ensemble_models.items():
+            if ensemble.is_trained():
+                print(f"Evaluating {ensemble_name}...")
+                try:
+                    eval_result = self.evaluator.evaluate_model(ensemble, data, comprehensive)
+                    evaluation_results['ensemble_evaluations'][ensemble_name] = eval_result
+                except Exception as e:
+                    print(f"Error evaluating {ensemble_name}: {e}")
+                    evaluation_results['ensemble_evaluations'][ensemble_name] = {'error': str(e)}
+        
+        # Compare all models
+        all_models = []
+        for model in self.models.values():
+            if model.is_trained():
+                all_models.append(model)
+        for ensemble in self.ensemble_models.values():
+            if ensemble.is_trained():
+                all_models.append(ensemble)
+        
+        if all_models:
+            try:
+                comparison_result = self.evaluator.compare_models(all_models, data)
+                evaluation_results['model_comparison'] = comparison_result
+            except Exception as e:
+                print(f"Error in model comparison: {e}")
+                evaluation_results['model_comparison'] = {'error': str(e)}
+        
+        return evaluation_results
+    
+    def get_multi_horizon_predictions(self, data: pd.DataFrame, 
+                                     horizons: List[int] = [5, 20, 100]) -> Dict[str, Dict]:
+        """Get predictions for multiple time horizons."""
+        multi_horizon_preds = {}
+        
+        for horizon in horizons:
+            print(f"Generating {horizon}-period ahead predictions...")
+            
+            # For multi-horizon, we would ideally train models for each horizon
+            # For now, we'll use the current models and adjust confidence based on horizon
+            predictions = self.get_predictions(data)
+            
+            # Adjust confidence for longer horizons (typically less reliable)
+            horizon_factor = max(0.3, 1.0 - (horizon - 5) * 0.01)  # Decrease confidence for longer horizons
+            
+            adjusted_predictions = {}
+            for model_name, pred in predictions.items():
+                if 'error' not in pred:
+                    adjusted_pred = pred.copy()
+                    adjusted_pred['confidence'] *= horizon_factor
+                    adjusted_pred['horizon'] = horizon
+                    adjusted_predictions[model_name] = adjusted_pred
+            
+            # Get ensemble prediction for this horizon
+            if adjusted_predictions:
+                ensemble_pred = self.get_ensemble_prediction(data)
+                if 'error' not in ensemble_pred:
+                    ensemble_pred['confidence'] *= horizon_factor
+                    ensemble_pred['horizon'] = horizon
+                    adjusted_predictions['ensemble'] = ensemble_pred
+            
+            multi_horizon_preds[f'{horizon}_period'] = adjusted_predictions
+        
+        return multi_horizon_preds
     
     def save_all_models(self) -> Dict[str, bool]:
         """Save all trained models.

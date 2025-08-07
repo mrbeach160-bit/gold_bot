@@ -109,7 +109,7 @@ def create_model(model_type: str, symbol: str, timeframe: str) -> BaseModel:
     Raises:
         ValueError: If model_type is not supported or dependencies unavailable
     """
-    from .ml_models import LSTMModel, LightGBMModel, XGBoostModel, TENSORFLOW_AVAILABLE, LIGHTGBM_AVAILABLE, XGBOOST_AVAILABLE
+    from .ml_models import LSTMModel, LightGBMModel, XGBoostModel, SVCModel, NaiveBayesModel, CNNModel, TENSORFLOW_AVAILABLE, LIGHTGBM_AVAILABLE, XGBOOST_AVAILABLE
     
     model_mapping = {
         'lstm': (LSTMModel, TENSORFLOW_AVAILABLE, "TensorFlow"),
@@ -117,6 +117,10 @@ def create_model(model_type: str, symbol: str, timeframe: str) -> BaseModel:
         'lgb': (LightGBMModel, LIGHTGBM_AVAILABLE, "LightGBM"),  # Alias
         'xgboost': (XGBoostModel, XGBOOST_AVAILABLE, "XGBoost"),
         'xgb': (XGBoostModel, XGBOOST_AVAILABLE, "XGBoost"),  # Alias
+        'svc': (SVCModel, True, "scikit-learn"),
+        'nb': (NaiveBayesModel, True, "scikit-learn"),
+        'naive_bayes': (NaiveBayesModel, True, "scikit-learn"),  # Alias
+        'cnn': (CNNModel, TENSORFLOW_AVAILABLE, "TensorFlow"),
     }
     
     model_type_lower = model_type.lower()

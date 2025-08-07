@@ -20,6 +20,12 @@ try:
 except ImportError:
     CONFIG_AVAILABLE = False
     print("Warning: Configuration system not available, using defaults")
+    # Define minimal ModelConfig for fallback
+    class ModelConfig:
+        def __init__(self):
+            self.models_to_use = ["lstm", "xgb", "cnn", "svc", "nb", "meta"]
+            self.ensemble_method = "meta_learner"
+            self.confidence_threshold = 0.6
 
 
 class ModelManager:

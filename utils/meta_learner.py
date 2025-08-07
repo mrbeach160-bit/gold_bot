@@ -65,7 +65,7 @@ def prepare_data_for_meta_learner(df, lstm_predictions, xgb_predictions, xgb_con
 def train_meta_learner(df, lstm_predictions, xgb_predictions, xgb_confidences,
                        cnn_predictions, svc_predictions, svc_confidences,
                        nb_predictions, nb_confidences, timeframe_key,
-                       tune_hyperparams=False, n_iter=50):
+                       tune_hyperparams=True, n_iter=50):  # Changed default to True
     """
     Melatih Master AI menggunakan LightGBM.
     Jika tune_hyperparams=True, lakukan RandomizedSearchCV.

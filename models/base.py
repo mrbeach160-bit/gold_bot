@@ -99,7 +99,7 @@ def create_model(model_type: str, symbol: str, timeframe: str) -> BaseModel:
     """Factory function to create model instances.
     
     Args:
-        model_type: Type of model ('lstm', 'lightgbm', 'xgboost', 'svc', 'nb')
+        model_type: Type of model ('lstm', 'lightgbm', 'xgboost', 'cnn', 'svc', 'nb')
         symbol: Trading symbol (e.g., 'XAU/USD')
         timeframe: Timeframe (e.g., '5m', '1h')
         
@@ -109,7 +109,7 @@ def create_model(model_type: str, symbol: str, timeframe: str) -> BaseModel:
     Raises:
         ValueError: If model_type is not supported or dependencies unavailable
     """
-    from .ml_models import (LSTMModel, LightGBMModel, XGBoostModel, SVCModel, NaiveBayesModel,
+    from .ml_models import (LSTMModel, LightGBMModel, XGBoostModel, CNNModel, SVCModel, NaiveBayesModel,
                            TENSORFLOW_AVAILABLE, LIGHTGBM_AVAILABLE, XGBOOST_AVAILABLE)
     
     model_mapping = {
@@ -118,6 +118,7 @@ def create_model(model_type: str, symbol: str, timeframe: str) -> BaseModel:
         'lgb': (LightGBMModel, LIGHTGBM_AVAILABLE, "LightGBM"),  # Alias
         'xgboost': (XGBoostModel, XGBOOST_AVAILABLE, "XGBoost"),
         'xgb': (XGBoostModel, XGBOOST_AVAILABLE, "XGBoost"),  # Alias
+        'cnn': (CNNModel, TENSORFLOW_AVAILABLE, "TensorFlow"),
         'svc': (SVCModel, True, "scikit-learn"),  # SVC is part of sklearn which is always available
         'naivebayes': (NaiveBayesModel, True, "scikit-learn"),
         'nb': (NaiveBayesModel, True, "scikit-learn"),  # Alias

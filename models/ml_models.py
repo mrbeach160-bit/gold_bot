@@ -16,13 +16,13 @@ from typing import Dict, Any, List
 try:
     import tensorflow as tf
     from tensorflow.keras.models import Sequential, load_model
-    from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
+    from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization, Conv1D, MaxPooling1D, GlobalMaxPooling1D, Flatten
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
     from sklearn.preprocessing import MinMaxScaler
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
-    print("Warning: TensorFlow not available, LSTM model will be disabled")
+    print("Warning: TensorFlow not available, LSTM and CNN models will be disabled")
 
 # Try to import LightGBM, handle gracefully if not available  
 try:
@@ -926,6 +926,368 @@ class XGBoostModel(BaseModel):
             'confidence': 0.0,
             'probability': 0.0,
             'model_name': 'XGBoost',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': 'Model not trained or unavailable'
+        }
+
+
+class CNNModel(BaseModel):
+    """Enhanced Convolutional Neural Network model for financial time series prediction."""
+    
+    def __init__(self, symbol: str, timeframe: str):
+        super().__init__(symbol, timeframe)
+        self.scaler = None
+        
+        # Enhanced CNN configuration
+        self.sequence_length = 30  # Optimized for CNN
+        self.dropout_rate = 0.4  # Higher dropout for CNN
+        self.use_batch_norm = True
+        self.epochs = 30
+        self.batch_size = 32
+        
+        # CNN architecture parameters
+        self.filter_sizes = [32, 64, 128]  # Multiple filter sizes
+        self.kernel_sizes = [3, 5, 7]  # Different kernel sizes for multi-scale features
+        self.pool_size = 2
+        self.use_global_pooling = True
+        self.use_early_stopping = True
+        self.patience = 10
+        
+        if not TENSORFLOW_AVAILABLE:
+            print(f"Warning: TensorFlow not available, CNN model for {symbol} {timeframe} will not function")
+    
+    def train(self, data: pd.DataFrame) -> bool:
+        """Train enhanced CNN model with multi-scale feature extraction."""
+        if not TENSORFLOW_AVAILABLE:
+            print("Cannot train CNN model: TensorFlow not available")
+            return False
+            
+        try:
+            print(f"Training enhanced CNN model for {self.symbol} timeframe {self.timeframe}...")
+            print(f"Configuration: sequence_length={self.sequence_length}, filters={self.filter_sizes}")
+            
+            # Prepare data with multiple features
+            feature_columns = ['open', 'high', 'low', 'close']
+            
+            # Add volume if available
+            if 'volume' in data.columns:
+                feature_columns.append('volume')
+            
+            # Prepare target (classification: price will go up or down)
+            df = data.copy()
+            df['future_close'] = df['close'].shift(-5)  # 5 periods ahead
+            df.dropna(inplace=True)
+            df['target'] = (df['future_close'] > df['close']).astype(int)
+            
+            # Normalize features
+            feature_data = df[feature_columns].values
+            self.scaler = MinMaxScaler()
+            scaled_data = self.scaler.fit_transform(feature_data)
+            
+            # Create sequences for CNN
+            X, y = [], []
+            for i in range(self.sequence_length, len(scaled_data)):
+                X.append(scaled_data[i-self.sequence_length:i])
+                y.append(df['target'].iloc[i])
+            
+            X, y = np.array(X), np.array(y)
+            
+            if len(X) < 50:
+                print(f"Insufficient data for CNN training: {len(X)} sequences")
+                return False
+            
+            # Split data
+            split_idx = int(len(X) * 0.8)
+            X_train, X_val = X[:split_idx], X[split_idx:]
+            y_train, y_val = y[:split_idx], y[split_idx:]
+            
+            # Build enhanced CNN model
+            tf.keras.backend.clear_session()
+            
+            model = Sequential()
+            
+            # First convolutional block with multiple filter sizes
+            model.add(Conv1D(
+                filters=self.filter_sizes[0], 
+                kernel_size=self.kernel_sizes[0], 
+                activation='relu',
+                input_shape=(X.shape[1], X.shape[2])
+            ))
+            if self.use_batch_norm:
+                model.add(BatchNormalization())
+            model.add(MaxPooling1D(pool_size=self.pool_size))
+            model.add(Dropout(self.dropout_rate))
+            
+            # Second convolutional block
+            model.add(Conv1D(
+                filters=self.filter_sizes[1], 
+                kernel_size=self.kernel_sizes[1], 
+                activation='relu'
+            ))
+            if self.use_batch_norm:
+                model.add(BatchNormalization())
+            model.add(MaxPooling1D(pool_size=self.pool_size))
+            model.add(Dropout(self.dropout_rate))
+            
+            # Third convolutional block
+            model.add(Conv1D(
+                filters=self.filter_sizes[2], 
+                kernel_size=self.kernel_sizes[2], 
+                activation='relu'
+            ))
+            if self.use_batch_norm:
+                model.add(BatchNormalization())
+            
+            # Global pooling for better feature extraction
+            if self.use_global_pooling:
+                model.add(GlobalMaxPooling1D())
+            else:
+                model.add(Flatten())
+            
+            model.add(Dropout(self.dropout_rate))
+            
+            # Dense layers
+            model.add(Dense(128, activation='relu'))
+            model.add(Dropout(self.dropout_rate))
+            model.add(Dense(64, activation='relu'))
+            model.add(Dropout(self.dropout_rate))
+            model.add(Dense(1, activation='sigmoid'))
+            
+            # Compile model
+            model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                loss='binary_crossentropy',
+                metrics=['accuracy']
+            )
+            
+            self.model = model
+            
+            # Setup callbacks
+            callbacks = []
+            
+            if self.use_early_stopping:
+                early_stopping = EarlyStopping(
+                    monitor='val_loss',
+                    patience=self.patience,
+                    restore_best_weights=True,
+                    verbose=1
+                )
+                callbacks.append(early_stopping)
+            
+            reduce_lr = ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=self.patience // 2,
+                min_lr=0.0001,
+                verbose=1
+            )
+            callbacks.append(reduce_lr)
+            
+            print(f"Starting CNN training with {len(X_train)} training samples, {len(X_val)} validation samples...")
+            
+            # Train model
+            history = self.model.fit(
+                X_train, y_train,
+                epochs=self.epochs,
+                batch_size=self.batch_size,
+                validation_data=(X_val, y_val),
+                callbacks=callbacks,
+                verbose=1
+            )
+            
+            # Print training results
+            final_loss = history.history['loss'][-1]
+            final_val_loss = history.history['val_loss'][-1]
+            final_acc = history.history['accuracy'][-1]
+            final_val_acc = history.history['val_accuracy'][-1]
+            
+            print(f"Enhanced CNN training completed.")
+            print(f"Final - Loss: {final_loss:.4f}, Acc: {final_acc:.4f}")
+            print(f"Final - Val Loss: {final_val_loss:.4f}, Val Acc: {final_val_acc:.4f}")
+            
+            self._trained = True
+            return True
+            
+        except Exception as e:
+            print(f"Error training CNN model: {e}")
+            return False
+    
+    def predict(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """Make prediction with enhanced CNN model."""
+        if not TENSORFLOW_AVAILABLE:
+            return self._unavailable_prediction("TensorFlow not available")
+            
+        if not self._trained or self.model is None or self.scaler is None:
+            return self._default_prediction()
+        
+        try:
+            # Prepare features same as training
+            feature_columns = ['open', 'high', 'low', 'close']
+            
+            if 'volume' in data.columns:
+                feature_columns.append('volume')
+            
+            # Get last sequence for prediction
+            if len(data) < self.sequence_length:
+                return self._default_prediction()
+            
+            last_sequence = data[feature_columns].values[-self.sequence_length:]
+            scaled_seq = self.scaler.transform(last_sequence)
+            X = np.reshape(scaled_seq, (1, self.sequence_length, len(feature_columns)))
+            
+            pred_proba = self.model.predict(X, verbose=0)[0][0]
+            
+            # Convert to direction and confidence
+            if pred_proba > 0.5:
+                direction = "BUY"
+                confidence = pred_proba
+            else:
+                direction = "SELL"
+                confidence = 1 - pred_proba
+            
+            return {
+                'direction': direction,
+                'confidence': confidence,
+                'probability': pred_proba,
+                'model_name': 'CNN',
+                'timestamp': datetime.now(),
+                'features_used': feature_columns,
+                'sequence_length': self.sequence_length,
+                'enhanced': True
+            }
+            
+        except Exception as e:
+            print(f"Error making CNN prediction: {e}")
+            return self._default_prediction()
+    
+    def save(self) -> bool:
+        """Save enhanced CNN model, scaler, and configuration."""
+        if not TENSORFLOW_AVAILABLE:
+            print("Cannot save CNN model: TensorFlow not available")
+            return False
+            
+        try:
+            os.makedirs('model', exist_ok=True)
+            
+            # Save model
+            model_path = self.get_model_path('.keras')
+            self.model.save(model_path)
+            
+            # Save scaler
+            scaler_path = self.get_model_path('_scaler.pkl')
+            joblib.dump(self.scaler, scaler_path)
+            
+            # Save configuration
+            config_path = self.get_model_path('_config.json')
+            config = {
+                'sequence_length': self.sequence_length,
+                'dropout_rate': self.dropout_rate,
+                'use_batch_norm': self.use_batch_norm,
+                'epochs': self.epochs,
+                'batch_size': self.batch_size,
+                'filter_sizes': self.filter_sizes,
+                'kernel_sizes': self.kernel_sizes,
+                'pool_size': self.pool_size,
+                'use_global_pooling': self.use_global_pooling,
+                'use_early_stopping': self.use_early_stopping,
+                'patience': self.patience,
+                'symbol': self.symbol,
+                'timeframe': self.timeframe
+            }
+            with open(config_path, 'w') as f:
+                json.dump(config, f)
+            
+            print(f"Enhanced CNN model saved to {model_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Error saving CNN model: {e}")
+            return False
+    
+    def load(self) -> bool:
+        """Load enhanced CNN model, scaler, and configuration."""
+        if not TENSORFLOW_AVAILABLE:
+            print("Cannot load CNN model: TensorFlow not available")
+            return False
+            
+        try:
+            model_path = self.get_model_path('.keras')
+            scaler_path = self.get_model_path('_scaler.pkl')
+            config_path = self.get_model_path('_config.json')
+            
+            if os.path.exists(model_path) and os.path.exists(scaler_path):
+                self.model = load_model(model_path)
+                self.scaler = joblib.load(scaler_path)
+                
+                # Load configuration if available
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                        self.sequence_length = config.get('sequence_length', 30)
+                        self.dropout_rate = config.get('dropout_rate', 0.4)
+                        self.use_batch_norm = config.get('use_batch_norm', True)
+                        self.epochs = config.get('epochs', 30)
+                        self.batch_size = config.get('batch_size', 32)
+                        self.filter_sizes = config.get('filter_sizes', [32, 64, 128])
+                        self.kernel_sizes = config.get('kernel_sizes', [3, 5, 7])
+                        self.pool_size = config.get('pool_size', 2)
+                        self.use_global_pooling = config.get('use_global_pooling', True)
+                        self.use_early_stopping = config.get('use_early_stopping', True)
+                        self.patience = config.get('patience', 10)
+                
+                self._trained = True
+                print(f"Enhanced CNN model loaded from {model_path}")
+                return True
+            else:
+                print(f"CNN model files not found: {model_path}, {scaler_path}")
+                return False
+                
+        except Exception as e:
+            print(f"Error loading CNN model: {e}")
+            return False
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Return enhanced CNN model metadata."""
+        return {
+            'name': 'CNN',
+            'type': 'convolutional_neural_network',
+            'symbol': self.symbol,
+            'timeframe': self.timeframe,
+            'sequence_length': self.sequence_length,
+            'dropout_rate': self.dropout_rate,
+            'use_batch_norm': self.use_batch_norm,
+            'epochs': self.epochs,
+            'batch_size': self.batch_size,
+            'filter_sizes': self.filter_sizes,
+            'kernel_sizes': self.kernel_sizes,
+            'use_global_pooling': self.use_global_pooling,
+            'trained': self._trained,
+            'features': ['open', 'high', 'low', 'close', 'volume'],
+            'model_path': self.get_model_path('.keras'),
+            'available': TENSORFLOW_AVAILABLE,
+            'enhanced': True
+        }
+    
+    def _unavailable_prediction(self, reason: str) -> Dict[str, Any]:
+        """Return prediction when dependencies unavailable."""
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'CNN',
+            'timestamp': datetime.now(),
+            'features_used': [],
+            'error': reason
+        }
+    
+    def _default_prediction(self) -> Dict[str, Any]:
+        """Return default prediction when model unavailable."""
+        return {
+            'direction': 'HOLD',
+            'confidence': 0.0,
+            'probability': 0.0,
+            'model_name': 'CNN',
             'timestamp': datetime.now(),
             'features_used': [],
             'error': 'Model not trained or unavailable'

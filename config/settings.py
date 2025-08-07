@@ -80,7 +80,7 @@ class APIConfig:
 
 @dataclass
 class ModelConfig:
-    """Machine learning model configuration."""
+    """Enhanced machine learning model configuration with tuning parameters."""
     
     models_to_use: List[str] = field(default_factory=lambda: [
         "lstm", "xgb", "cnn", "svc", "nb", "meta"
@@ -89,26 +89,80 @@ class ModelConfig:
     retrain_interval: int = field(default=7)  # days
     confidence_threshold: float = field(default=0.6)
     
-    # Model-specific parameters
+    # Enhanced tuning parameters
+    enable_hyperparameter_tuning: bool = field(default=True)
+    enable_meta_learner_tuning: bool = field(default=True)
+    
+    # LSTM enhanced parameters
     lstm_sequence_length: int = field(default=60)
-    cnn_sequence_length: int = field(default=20)
-    xgb_max_depth: int = field(default=6)
-    xgb_n_estimators: int = field(default=100)
+    lstm_epochs: int = field(default=50)  # Enhanced from 10
+    lstm_dropout: float = field(default=0.3)
+    lstm_use_batch_norm: bool = field(default=True)
+    lstm_use_early_stopping: bool = field(default=True)
+    lstm_patience: int = field(default=10)
+    lstm_units: List[int] = field(default_factory=lambda: [50, 50])
+    
+    # CNN enhanced parameters  
+    cnn_sequence_length: int = field(default=30)  # Optimized for CNN
+    cnn_epochs: int = field(default=30)
+    cnn_dropout: float = field(default=0.4)
+    cnn_filter_sizes: List[int] = field(default_factory=lambda: [32, 64, 128])
+    cnn_kernel_sizes: List[int] = field(default_factory=lambda: [3, 5, 7])
+    cnn_use_global_pooling: bool = field(default=True)
+    cnn_use_batch_norm: bool = field(default=True)
+    
+    # XGBoost enhanced parameters
+    xgb_max_depth: int = field(default=6)  # Enhanced from 3
+    xgb_n_estimators: int = field(default=300)  # Enhanced from 100
+    xgb_learning_rate: float = field(default=0.05)  # Enhanced from 0.1
+    xgb_subsample: float = field(default=0.8)
+    xgb_colsample_bytree: float = field(default=0.8)
+    xgb_reg_alpha: float = field(default=0.1)
+    xgb_reg_lambda: float = field(default=1.0)
+    
+    # SVC enhanced parameters
+    svc_c_range: List[float] = field(default_factory=lambda: [0.1, 1, 10, 100])
+    svc_gamma_range: List[str] = field(default_factory=lambda: ['scale', 'auto'])
+    svc_kernels: List[str] = field(default_factory=lambda: ['rbf', 'poly', 'linear'])
+    svc_enable_grid_search: bool = field(default=True)
+    
+    # Meta-learner enhanced parameters
+    meta_n_iter: int = field(default=50)  # For RandomizedSearchCV
+    meta_cv_folds: int = field(default=3)
+    meta_scoring: str = field(default='f1_macro')
     
     # Training parameters
     train_test_split: float = field(default=0.8)
     validation_split: float = field(default=0.2)
     batch_size: int = field(default=32)
-    epochs: int = field(default=10)
+    epochs: int = field(default=50)  # Enhanced default
     
     def __post_init__(self):
-        """Validate model configuration."""
+        """Validate enhanced model configuration."""
         valid_ensemble_methods = ["meta_learner", "voting", "averaging"]
         if self.ensemble_method not in valid_ensemble_methods:
             raise ValueError(f"Ensemble method must be one of {valid_ensemble_methods}")
         
         if not 0.5 <= self.confidence_threshold <= 1.0:
             raise ValueError("Confidence threshold must be between 0.5 and 1.0")
+        
+        # Validate LSTM parameters
+        if not 10 <= self.lstm_sequence_length <= 100:
+            raise ValueError("LSTM sequence length must be between 10 and 100")
+        if not 0.1 <= self.lstm_dropout <= 0.8:
+            raise ValueError("LSTM dropout must be between 0.1 and 0.8")
+        
+        # Validate CNN parameters
+        if not 10 <= self.cnn_sequence_length <= 50:
+            raise ValueError("CNN sequence length must be between 10 and 50")
+        if not 0.1 <= self.cnn_dropout <= 0.8:
+            raise ValueError("CNN dropout must be between 0.1 and 0.8")
+        
+        # Validate XGBoost parameters
+        if not 3 <= self.xgb_max_depth <= 15:
+            raise ValueError("XGBoost max_depth must be between 3 and 15")
+        if not 0.01 <= self.xgb_learning_rate <= 0.3:
+            raise ValueError("XGBoost learning_rate must be between 0.01 and 0.3")
 
 
 @dataclass

@@ -5,7 +5,7 @@ Provides standardized model interfaces, factory patterns, and centralized manage
 """
 
 from .base import BaseModel, create_model
-from .ml_models import LSTMModel, LightGBMModel, XGBoostModel, SVCModel, NaiveBayesModel
+from .ml_models import LSTMModel, LightGBMModel, XGBoostModel, CNNModel, SVCModel, NaiveBayesModel
 from .ensemble import MetaLearner, VotingEnsemble, WeightedVotingEnsemble
 from .manager import ModelManager
 
@@ -15,6 +15,7 @@ __all__ = [
     'LSTMModel', 
     'LightGBMModel',
     'XGBoostModel',
+    'CNNModel',
     'SVCModel',
     'NaiveBayesModel',
     'MetaLearner',

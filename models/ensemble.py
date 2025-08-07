@@ -78,10 +78,11 @@ class MetaLearner(BaseModel):
     def train(self, data: pd.DataFrame, lstm_predictions=None, xgb_predictions=None, 
               xgb_confidences=None, cnn_predictions=None, svc_predictions=None, 
               svc_confidences=None, nb_predictions=None, nb_confidences=None,
-              tune_hyperparams=False, n_iter=50) -> bool:
-        """Train meta learner using LightGBM (minimal change from original)."""
+              tune_hyperparams=True, n_iter=50) -> bool:  # Changed default to True
+        """Train meta learner using LightGBM with tuning enabled by default."""
         try:
             print(f"Training Meta Learner for {self.symbol} timeframe {self.timeframe}...")
+            print(f"Hyperparameter tuning: {'Enabled' if tune_hyperparams else 'Disabled'}")
             
             # Prepare data
             X, y = self.prepare_data_for_meta_learner(
@@ -103,28 +104,32 @@ class MetaLearner(BaseModel):
 
             base_model = LGBMClassifier(random_state=42)
             if tune_hyperparams:
+                # Enhanced parameter distribution for better financial data performance
                 param_dist = {
-                    'n_estimators': [100, 200, 300],
-                    'num_leaves': [31, 63, 127],
-                    'learning_rate': [0.01, 0.05, 0.1],
-                    'subsample': [0.6, 0.8, 1.0],
-                    'colsample_bytree': [0.6, 0.8, 1.0]
+                    'n_estimators': [100, 200, 300, 500],
+                    'num_leaves': [31, 63, 127, 255],
+                    'learning_rate': [0.01, 0.05, 0.1, 0.15],
+                    'subsample': [0.6, 0.7, 0.8, 0.9],
+                    'colsample_bytree': [0.6, 0.7, 0.8, 0.9],
+                    'reg_alpha': [0, 0.1, 0.5],
+                    'reg_lambda': [0, 0.1, 0.5, 1.0]
                 }
                 search = RandomizedSearchCV(
                     base_model, param_distributions=param_dist,
                     n_iter=n_iter, scoring='f1_macro', cv=3,
                     random_state=42, n_jobs=-1
                 )
-                print("Starting hyperparameter tuning for LightGBM...")
+                print(f"Starting enhanced hyperparameter tuning for Meta Learner ({n_iter} iterations)...")
                 search.fit(X_train, y_train)
                 self.model = search.best_estimator_
-                print(f"Best params: {search.best_params_}")
+                print(f"Best Meta Learner parameters: {search.best_params_}")
+                print(f"Best CV score: {search.best_score_:.4f}")
             else:
                 self.model = base_model
                 print(f"Training standard LGBMClassifier for timeframe {self.timeframe}...")
                 self.model.fit(X_train, y_train)
 
-            # Evaluation
+            # Enhanced evaluation
             y_pred = self.model.predict(X_test)
             print(confusion_matrix(y_test, y_pred))
             print("\nClassification Report:")
@@ -132,7 +137,7 @@ class MetaLearner(BaseModel):
 
             self.expected_features = list(X.columns)
             self._trained = True
-            print("Meta Learner training completed.")
+            print("Enhanced Meta Learner training completed.")
             return True
             
         except Exception as e:

@@ -1,0 +1,1 @@
+# Configuration module for Gold Bot Trading AI

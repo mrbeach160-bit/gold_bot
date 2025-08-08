@@ -100,7 +100,8 @@ class SignalPanel:
                 api_key = st.text_input(
                     "Custom API Key",
                     type="password",
-                    help="Override default API key"
+                    help="Override default API key",
+                    key="signal_api_key"
                 )
         
         return {

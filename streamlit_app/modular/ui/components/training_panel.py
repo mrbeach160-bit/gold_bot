@@ -110,7 +110,8 @@ class TrainingPanel:
             api_key = st.text_input(
                 "API Key (Optional)",
                 type="password",
-                help="Twelve Data API key"
+                help="Twelve Data API key",
+                key="training_api_key"
             )
         
         with col3:

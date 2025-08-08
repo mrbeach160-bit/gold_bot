@@ -187,7 +187,8 @@ class BacktestPanel:
             api_key = st.text_input(
                 "API Key (Optional)",
                 type="password",
-                help="Twelve Data API key"
+                help="Twelve Data API key",
+                key="backtest_api_key"
             )
             if api_key:
                 config['api_key'] = api_key

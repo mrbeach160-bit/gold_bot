@@ -85,6 +85,15 @@ class WebSocketManager:
         client_key = f"{api_source}_{symbol}"
         data = self.latest_data.get(client_key)
         return data.get('price') if data else None
+    
+    def get_price(self, symbol):
+        """Get price from any available WebSocket connection for the symbol"""
+        # Try different API sources
+        for api_source in ["Binance", "Twelve Data"]:
+            price = self.get_latest_price(api_source, symbol)
+            if price and price > 0:
+                return price
+        return None
         
     def get_connection_status(self, api_source, symbol):
         """Get connection status"""

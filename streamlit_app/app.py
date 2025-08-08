@@ -117,21 +117,58 @@ except ImportError:
     data_manager = None
     trading_manager = None
 
+# === NEW MODULAR IMPORTS ===
+try:
+    # Core modules
+    from .core.indicators import add_indicators, compute_rsi
+    from .core.support_resistance import get_support_resistance
+    from .core.prediction_pipeline import predict_with_models
+    
+    # Strategy modules
+    from .strategy.modes import (
+        ENTRY_MODE_MOMENTUM, ENTRY_MODE_PULLBACK, DEFAULT_ENTRY_MODE,
+        ENTRY_MODES, ENTRY_MODE_DISPLAY_NAMES, ENTRY_MODE_DESCRIPTIONS
+    )
+    from .strategy.smart_entry import calculate_smart_entry_price
+    
+    # Risk management
+    from .risk.position_sizing import calculate_position_info
+    
+    # UI components
+    from .ui.signal_display import display_smart_signal_results
+    
+    # Utilities
+    from .utils.price_format import format_price
+    
+    MODULAR_COMPONENTS_AVAILABLE = True
+    print("✅ New modular components loaded successfully")
+except ImportError as e:
+    print(f"⚠️ Modular components not available: {e}")
+    MODULAR_COMPONENTS_AVAILABLE = False
+
 # Import data utilities from utils folder (legacy compatibility)
 try:
     from utils.data import get_gold_data # Untuk Twelve Data
-    from utils.indicators import add_indicators, get_support_resistance, compute_rsi
+    from utils.indicators import add_indicators as legacy_add_indicators, get_support_resistance as legacy_get_support_resistance, compute_rsi as legacy_compute_rsi
     label_map = {1: "BUY", -1: "SELL", 0: "HOLD"}
     from utils.meta_learner import train_meta_learner, prepare_data_for_meta_learner, get_meta_signal
 
     UTILS_AVAILABLE = True
+    
+    # Use modular components if available, otherwise fallback to legacy
+    if not MODULAR_COMPONENTS_AVAILABLE:
+        add_indicators = legacy_add_indicators
+        get_support_resistance = legacy_get_support_resistance
+        compute_rsi = legacy_compute_rsi
+        
 except ImportError as e:
     st.error("Utils modules tidak ditemukan. Pastikan folder 'utils' tersedia dengan file:")
     st.error("- utils/data.py (untuk get_gold_data)")
     st.error("- utils/indicators.py (untuk add_indicators, get_support_resistance, compute_rsi)")
     st.error("- utils/meta_learner.py (untuk train_meta_learner, prepare_data_for_meta_learner, get_meta_signal)")
     st.error(f"Error: {e}")
-    st.stop()
+    if not MODULAR_COMPONENTS_AVAILABLE:
+        st.stop()
 
 # ==============================================================================
 # TWELVE DATA WEBSOCKET INTEGRATION v8.3 (NEW)
@@ -440,9 +477,23 @@ if 'ws_manager' not in st.session_state:
     st.session_state.ws_manager = EnhancedWebSocketManager()
 
 # ==============================================================================
-# SMART AI ENTRY PATCH v8.0 FUNCTIONS
+# SMART AI ENTRY PATCH v8.0 FUNCTIONS (MODULARIZED)
 # ==============================================================================
-def calculate_smart_entry_price(signal, recent_data, predicted_price, confidence, symbol="XAUUSD"):
+
+# Legacy function wrapper for backward compatibility
+def calculate_smart_entry_price_legacy(signal, recent_data, predicted_price, confidence, symbol="XAUUSD"):
+    """
+    LEGACY WRAPPER: Use modular implementation if available, otherwise use embedded logic
+    """
+    if MODULAR_COMPONENTS_AVAILABLE:
+        # Use modular implementation with default momentum mode for backward compatibility
+        from .strategy.smart_entry import calculate_smart_entry_price as modular_calculate_smart_entry_price
+        return modular_calculate_smart_entry_price(signal, recent_data, predicted_price, confidence, symbol, mode=DEFAULT_ENTRY_MODE)
+    else:
+        # Fallback to original embedded logic for cases where modular components are not available
+        return calculate_smart_entry_price_embedded(signal, recent_data, predicted_price, confidence, symbol)
+
+def calculate_smart_entry_price_embedded(signal, recent_data, predicted_price, confidence, symbol="XAUUSD"):
     """
     🧠 SMART AI ENTRY PRICE CALCULATION
     
@@ -565,6 +616,14 @@ def calculate_smart_entry_price(signal, recent_data, predicted_price, confidence
             'risk_level': 'HIGH',
             'expected_fill_probability': 0.5
         }
+
+# Create compatibility alias - use modular version if available, otherwise use embedded
+if MODULAR_COMPONENTS_AVAILABLE:
+    # Use the modular version directly (already imported above)
+    pass  # calculate_smart_entry_price is already imported from modular components
+else:
+    # Use the embedded legacy version
+    calculate_smart_entry_price = calculate_smart_entry_price_embedded
 
 def _calculate_buy_entry(current_price, predicted_price, supports, resistances, 
                         rsi, atr, macd, macd_signal, confidence):
@@ -2022,13 +2081,23 @@ def run_backtest(symbol, data, initial_balance, risk_percent, sl_pips, tp_pips, 
                     
                     if signal in ['BUY', 'SELL'] and confidence > 0.55:
                         # 🧠 SMART AI ENTRY CALCULATION
-                        smart_entry_result = calculate_smart_entry_price(
-                            signal=signal,
-                            recent_data=data_slice,
-                            predicted_price=predicted_price,
-                            confidence=confidence,
-                            symbol=symbol
-                        )
+                        if MODULAR_COMPONENTS_AVAILABLE:
+                            smart_entry_result = calculate_smart_entry_price(
+                                signal=signal,
+                                recent_data=data_slice,
+                                predicted_price=predicted_price,
+                                confidence=confidence,
+                                symbol=symbol,
+                                mode=DEFAULT_ENTRY_MODE  # Use momentum mode for backtest consistency
+                            )
+                        else:
+                            smart_entry_result = calculate_smart_entry_price_embedded(
+                                signal=signal,
+                                recent_data=data_slice,
+                                predicted_price=predicted_price,
+                                confidence=confidence,
+                                symbol=symbol
+                            )
                         
                         entry_price = smart_entry_result['entry_price']
                         fill_prob = smart_entry_result['expected_fill_probability']
@@ -2172,6 +2241,39 @@ def main():
 
         symbol_input_key = f"symbol_input_{api_source.lower()}"
         symbol = st.selectbox("Pilih Simbol Trading", symbol_options, key=symbol_input_key, help=symbol_help_text)
+
+        # === NEW: ENTRY MODE SELECTOR ===
+        if MODULAR_COMPONENTS_AVAILABLE:
+            st.header("🎯 Smart Entry Mode")
+            entry_mode = st.selectbox(
+                "Pilih Entry Mode",
+                options=ENTRY_MODES,
+                format_func=lambda x: ENTRY_MODE_DISPLAY_NAMES[x],
+                index=0,  # Default to momentum
+                help="Momentum: Immediate execution at optimal levels. Pullback: Wait for price retracement for better entries."
+            )
+            
+            # Display mode description
+            st.caption(f"📝 {ENTRY_MODE_DESCRIPTIONS[entry_mode]}")
+            
+            # Show mode comparison info
+            with st.expander("ℹ️ Entry Mode Comparison", expanded=False):
+                st.markdown("""
+                **Momentum Mode (Default):**
+                - Immediate execution at calculated optimal price
+                - Higher fill probability (up to 95%)
+                - Best for trend-following strategies
+                - Current behavior - no changes to existing logic
+                
+                **Pullback Mode (NEW):**
+                - Waits for price retracement toward support/resistance
+                - Lower fill probability (up to 85%) due to waiting
+                - Better risk/reward potential
+                - Uses volatility anchor and support confluence
+                """)
+        else:
+            entry_mode = DEFAULT_ENTRY_MODE
+            st.info("💡 Using default momentum entry mode (modular components not available)")
 
         st.header("💰 Pengaturan Modal")
         account_balance = st.number_input("Modal Awal ($)", min_value=100.0, value=1000.0, step=100.0)
@@ -2364,14 +2466,24 @@ def main():
                                 if signal is None:
                                     st.error("❌ Model prediction gagal. Coba refresh atau latih ulang model.")
                                 else:
-                                    # Smart AI Entry calculation
-                                    smart_entry_result = calculate_smart_entry_price(
-                                        signal=signal,
-                                        recent_data=recent_data,
-                                        predicted_price=predicted_price,
-                                        confidence=confidence,
-                                        symbol=symbol
-                                    )
+                                    # Smart AI Entry calculation with selected entry mode
+                                    if MODULAR_COMPONENTS_AVAILABLE:
+                                        smart_entry_result = calculate_smart_entry_price(
+                                            signal=signal,
+                                            recent_data=recent_data,
+                                            predicted_price=predicted_price,
+                                            confidence=confidence,
+                                            symbol=symbol,
+                                            mode=entry_mode  # Use user-selected entry mode
+                                        )
+                                    else:
+                                        smart_entry_result = calculate_smart_entry_price_embedded(
+                                            signal=signal,
+                                            recent_data=recent_data,
+                                            predicted_price=predicted_price,
+                                            confidence=confidence,
+                                            symbol=symbol
+                                        )
                                     
                                     position_info = None
                                     if signal != "HOLD":
@@ -2478,13 +2590,23 @@ def main():
                                         
                                         # Live analysis for strong signals
                                         if signal in ['BUY', 'SELL'] and confidence > 0.7:
-                                            smart_entry_result = calculate_smart_entry_price(
-                                                signal=signal,
-                                                recent_data=recent_data,
-                                                predicted_price=predicted_price,
-                                                confidence=confidence,
-                                                symbol=symbol
-                                            )
+                                            if MODULAR_COMPONENTS_AVAILABLE:
+                                                smart_entry_result = calculate_smart_entry_price(
+                                                    signal=signal,
+                                                    recent_data=recent_data,
+                                                    predicted_price=predicted_price,
+                                                    confidence=confidence,
+                                                    symbol=symbol,
+                                                    mode=entry_mode  # Use user-selected entry mode
+                                                )
+                                            else:
+                                                smart_entry_result = calculate_smart_entry_price_embedded(
+                                                    signal=signal,
+                                                    recent_data=recent_data,
+                                                    predicted_price=predicted_price,
+                                                    confidence=confidence,
+                                                    symbol=symbol
+                                                )
                                             
                                             with live_analysis_placeholder.container():
                                                 st.markdown("### 🧠 Live Smart Entry Analysis")

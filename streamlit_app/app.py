@@ -48,6 +48,18 @@ except ImportError:
 
 # NEW IMPORTS for fixing previous errors and ensuring functionality
 from sklearn.preprocessing import MinMaxScaler
+
+# Import validation utilities for real-time signal validation
+try:
+    from validation_utils import (
+        validate_signal_realtime, validate_take_profit_realtime, 
+        is_signal_expired, get_signal_quality_score,
+        get_price_staleness_indicator, format_quality_indicator
+    )
+    VALIDATION_UTILS_AVAILABLE = True
+except ImportError:
+    st.warning("⚠️ Validation utilities not found. Some features may be limited.")
+    VALIDATION_UTILS_AVAILABLE = False
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
 import pandas_ta as ta
@@ -493,20 +505,37 @@ def calculate_smart_entry_price(signal, recent_data, predicted_price, confidence
         strategy_reasons.extend(reasons)
         risk_level = risk
         
-        # Calculate expected fill probability
-        price_distance = abs(entry_price - current_price) / current_price
-        fill_probability = max(0.1, 1.0 - (price_distance * 20))  # Higher chance if closer to current price
+        # Calculate expected fill probability with realistic assessment
+        if price_distance <= 0.001:  # 0.1%
+            fill_probability = 0.95
+        elif price_distance <= 0.002:  # 0.2%
+            fill_probability = 0.90
+        elif price_distance <= 0.003:  # 0.3%
+            fill_probability = 0.80
+        elif price_distance <= 0.005:  # 0.5%
+            fill_probability = 0.70
+        else:
+            fill_probability = max(0.1, 0.7 * (1 - price_distance * 100))  # Realistic decay
         
-        # Validate entry price reasonableness
-        max_deviation = 0.02  # 2% max deviation from current price
+        # Minimum fill probability threshold (70%)
+        if fill_probability < 0.7:
+            return {
+                'entry_price': current_price,
+                'strategy_reasons': [f'REJECTED: Fill probability {fill_probability:.1%} below 70% minimum'],
+                'risk_level': 'REJECTED',
+                'expected_fill_probability': fill_probability
+            }
+        
+        # Validate entry price reasonableness - TIGHTENED to 0.5%
+        max_deviation = 0.005  # 0.5% max deviation from current price (was 2%)
         if price_distance > max_deviation:
-            st.warning(f"⚠️ Smart entry price terlalu jauh dari current price ({price_distance:.2%}). Adjusting...")
-            if signal == "BUY":
-                entry_price = current_price + (current_price * 0.001)  # Small premium
-            else:
-                entry_price = current_price - (current_price * 0.001)  # Small discount
-            strategy_reasons.append("Entry adjusted for realism")
-            fill_probability = 0.9
+            # REJECT signal instead of adjusting when threshold exceeded
+            return {
+                'entry_price': current_price,
+                'strategy_reasons': [f'REJECTED: Entry price deviation {price_distance:.2%} exceeds maximum {max_deviation:.1%}'],
+                'risk_level': 'REJECTED',
+                'expected_fill_probability': 0.0
+            }
         
         return {
             'entry_price': entry_price,
@@ -658,22 +687,76 @@ def _calculate_sell_entry(current_price, predicted_price, supports, resistances,
     
     return final_entry, strategy_reasons, risk_level
 
-def display_smart_signal_results(signal, confidence, smart_entry_result, position_info, symbol):
+def display_smart_signal_results(signal, confidence, smart_entry_result, position_info, symbol, ws_price=None, current_price=None):
     """
-    Enhanced UI display dengan Smart AI strategy reasoning
+    Enhanced UI display dengan Smart AI strategy reasoning and real-time validation
     """
     if signal == "HOLD":
         st.info("🔄 **HOLD** - Menunggu opportunity yang lebih baik")
+        return
+    
+    # Check if signal is REJECTED
+    if smart_entry_result.get('risk_level') == 'REJECTED':
+        st.error("❌ **SIGNAL REJECTED**")
+        st.warning("Signal failed validation criteria:")
+        for reason in smart_entry_result['strategy_reasons']:
+            st.markdown(f"• {reason}")
         return
     
     # Main signal display
     signal_color = "🟢" if signal == "BUY" else "🔴"
     confidence_bar = "█" * int(confidence * 10) + "░" * (10 - int(confidence * 10))
     
+    # Real-time validation and quality scoring
+    validation_result = None
+    if VALIDATION_UTILS_AVAILABLE and position_info:
+        real_time_price = ws_price if ws_price and ws_price > 0 else current_price
+        if real_time_price:
+            validation_result = validate_signal_realtime(
+                signal=signal,
+                entry_price=smart_entry_result['entry_price'],
+                take_profit=position_info.get('take_profit'),
+                stop_loss=position_info.get('stop_loss'),
+                current_price=current_price or real_time_price,
+                ws_price=ws_price,
+                confidence=confidence,
+                symbol=symbol
+            )
+    
     st.markdown(f"""
     ## {signal_color} **{signal} SIGNAL**
     **Confidence:** {confidence:.1%} `{confidence_bar}`
     """)
+    
+    # Display validation results if available
+    if validation_result:
+        if not validation_result['is_valid']:
+            st.error(f"❌ **SIGNAL VALIDATION FAILED**: {validation_result['rejection_reason']}")
+            return
+        
+        # Display quality score and staleness
+        quality_indicator = format_quality_indicator(validation_result['quality_score']) if VALIDATION_UTILS_AVAILABLE else None
+        staleness_info = get_price_staleness_indicator(
+            current_price or validation_result['real_time_price'], 
+            ws_price
+        ) if VALIDATION_UTILS_AVAILABLE and current_price else None
+        
+        if quality_indicator:
+            st.markdown(f"**Signal Quality:** {quality_indicator['emoji']} {quality_indicator['text']}")
+        
+        if staleness_info:
+            if staleness_info['color'] == 'red':
+                st.error(staleness_info['message'])
+            elif staleness_info['color'] == 'orange':
+                st.warning(staleness_info['message'])
+            else:
+                st.success(staleness_info['message'])
+        
+        # Display warnings if any
+        if validation_result.get('warnings'):
+            with st.expander("⚠️ Signal Warnings", expanded=False):
+                for warning in validation_result['warnings']:
+                    st.warning(warning)
     
     # Smart Entry Information
     entry_price = smart_entry_result['entry_price']
@@ -694,8 +777,9 @@ def display_smart_signal_results(signal, confidence, smart_entry_result, positio
         )
     
     with col2:
+        fill_prob_color = "🟢" if fill_probability >= 0.8 else "🟡" if fill_probability >= 0.7 else "🔴"
         st.metric(
-            "Fill Probability",
+            f"{fill_prob_color} Fill Probability",
             f"{fill_probability:.1%}",
             help="Estimated probability of order execution"
         )
@@ -706,6 +790,17 @@ def display_smart_signal_results(signal, confidence, smart_entry_result, positio
             risk_level,
             help="Entry risk assessment based on market conditions"
         )
+    
+    # Real-time price comparison if available
+    if ws_price and current_price:
+        price_diff_pct = abs(ws_price - current_price) / current_price
+        entry_diff_pct = abs(entry_price - ws_price) / ws_price
+        
+        st.markdown("### 📡 **Real-time Price Analysis**")
+        rt_cols = st.columns(3)
+        rt_cols[0].metric("API Price", format_price(symbol, current_price))
+        rt_cols[1].metric("WebSocket Price", format_price(symbol, ws_price))
+        rt_cols[2].metric("Entry Deviation", f"{entry_diff_pct:.2%}")
     
     # Strategy Reasoning
     st.markdown("### 🧠 **Smart Entry Strategy**")
@@ -719,6 +814,25 @@ def display_smart_signal_results(signal, confidence, smart_entry_result, positio
         
         detail_cols = st.columns(4)
         detail_cols[0].metric("Position Size", f"{position_info['position_size']:.4f} {symbol.split('/')[0] if '/' in symbol else 'units'}")
+        detail_cols[1].metric("Stop Loss", format_price(symbol, position_info['stop_loss']))
+        detail_cols[2].metric("Take Profit", format_price(symbol, position_info['take_profit']))
+        detail_cols[3].metric("Risk Amount", f"${position_info['risk_amount']:.2f}")
+        
+        # Risk-Reward Ratio
+        sl_dist = abs(position_info['entry_price'] - position_info['stop_loss'])
+        tp_dist = abs(position_info['take_profit'] - position_info['entry_price'])
+        rr_ratio = (tp_dist / sl_dist) if sl_dist > 0 else 0
+        rr_color = "🟢" if rr_ratio >= 2 else "🟡" if rr_ratio >= 1.5 else "🔴"
+        st.metric(f"{rr_color} Risk:Reward Ratio", f"1:{rr_ratio:.2f}")
+        
+        # Signal expiry countdown if validation available
+        if validation_result and VALIDATION_UTILS_AVAILABLE:
+            signal_timestamp = datetime.now()  # In practice, this should be passed from signal generation
+            expiry_info = is_signal_expired(signal_timestamp, 30)
+            if expiry_info['remaining_seconds'] > 0:
+                st.info(f"⏰ Signal expires in {expiry_info['remaining_seconds']} seconds")
+            else:
+                st.error("⏰ Signal has expired - generate new signal for current market conditions")
         detail_cols[1].metric("Stop Loss", format_price(symbol, position_info['stop_loss']))
         detail_cols[2].metric("Take Profit", format_price(symbol, position_info['take_profit']))
         detail_cols[3].metric("Risk Amount", f"${position_info['risk_amount']:.2f}")
@@ -865,9 +979,17 @@ def calculate_position_info(signal, symbol, entry_price, sl_pips, tp_pips, balan
         st.error(f"❌ Error dalam perhitungan posisi: {str(e)}")
         return None
 
-def calculate_ai_take_profit(signal, entry_price, supports, resistances, atr_value):
+def calculate_ai_take_profit(signal, entry_price, supports, resistances, atr_value, current_price=None):
     """
-    Calculate intelligent take profit based on S/R levels with proper validation
+    Calculate intelligent take profit based on S/R levels with real-time validation
+    
+    Args:
+        signal: 'BUY' or 'SELL'
+        entry_price: Entry price for the trade
+        supports: Support levels DataFrame
+        resistances: Resistance levels DataFrame  
+        atr_value: Average True Range value
+        current_price: Current real-time market price for validation
     """
     try:
         buffer_percent = 0.001  # 0.1% buffer untuk avoid false breakouts
@@ -879,11 +1001,16 @@ def calculate_ai_take_profit(signal, entry_price, supports, resistances, atr_val
                 nearest_resistance = valid_resistances.min()
                 # Ensure reasonable distance (at least 1.5x ATR)
                 min_tp_distance = entry_price + (1.5 * atr_value)
-                return max(nearest_resistance, min_tp_distance)
+                take_profit = max(nearest_resistance, min_tp_distance)
             else:
                 # Fallback: 2x ATR
-                return entry_price + (2.0 * atr_value)
-        
+                take_profit = entry_price + (2.0 * atr_value)
+            
+            # REAL-TIME VALIDATION: TP should be above current price
+            if current_price and take_profit <= current_price * (1 + buffer_percent):
+                st.warning(f"⚠️ BUY TP {take_profit:.4f} already passed current price {current_price:.4f}")
+                return None  # Reject signal
+                
         elif signal == "SELL":
             # Cari support terdekat di bawah entry - buffer
             valid_supports = supports[supports < entry_price * (1 - buffer_percent)]
@@ -891,9 +1018,16 @@ def calculate_ai_take_profit(signal, entry_price, supports, resistances, atr_val
                 nearest_support = valid_supports.max()
                 # Ensure reasonable distance
                 max_tp_distance = entry_price - (1.5 * atr_value)
-                return min(nearest_support, max_tp_distance)
+                take_profit = min(nearest_support, max_tp_distance)
             else:
-                return entry_price - (2.0 * atr_value)
+                take_profit = entry_price - (2.0 * atr_value)
+            
+            # REAL-TIME VALIDATION: TP should be below current price
+            if current_price and take_profit >= current_price * (1 - buffer_percent):
+                st.warning(f"⚠️ SELL TP {take_profit:.4f} already passed current price {current_price:.4f}")
+                return None  # Reject signal
+        
+        return take_profit
     
     except Exception as e:
         st.warning(f"AI TP calculation failed: {e}")
@@ -2175,18 +2309,41 @@ def main():
                                 st.error("❌ Data tidak cukup atau gagal dimuat. Minimal 62 candle diperlukan.")
                                 st.info("💡 Coba refresh atau periksa koneksi internet dan API key.")
                             else:
-                                # ENHANCED: Use real-time price if available and enabled
+                                # ENHANCED: Prioritize real-time WebSocket price integration
                                 current_api_price = recent_data['close'].iloc[-1]
                                 ws_price = st.session_state.ws_manager.get_price(symbol) if use_ws_price else None
                                 
+                                # Real-time price validation and integration
+                                real_time_price = current_api_price  # Default fallback
+                                price_source = "API"
+                                
                                 if ws_price and ws_price > 0 and use_ws_price:
                                     price_diff_pct = abs(ws_price - current_api_price) / current_api_price
-                                    if price_diff_pct < 0.05:  # Within 5%
-                                        st.info(f"📡 Using {api_source} Real-time Price: {format_price(symbol, ws_price)} (API: {format_price(symbol, current_api_price)})")
-                                        # Update the last row with real-time price
+                                    
+                                    # Tightened threshold for WebSocket price acceptance (2% -> 1%)
+                                    if price_diff_pct < 0.01:  # Within 1%
+                                        real_time_price = ws_price
+                                        price_source = "WebSocket"
+                                        # Update the last row with real-time price for calculations
                                         recent_data.loc[recent_data.index[-1], 'close'] = ws_price
+                                        st.success(f"📡 Using Real-time WebSocket Price: {format_price(symbol, ws_price)} (API: {format_price(symbol, current_api_price)}, Δ: {price_diff_pct:.2%})")
                                     else:
-                                        st.warning(f"⚠️ Real-time price deviation too high ({price_diff_pct:.2%}), using API price")
+                                        st.warning(f"⚠️ WebSocket price deviation {price_diff_pct:.2%} > 1% threshold, using API price")
+                                        st.info(f"🔄 Real-time: {format_price(symbol, ws_price)} vs API: {format_price(symbol, current_api_price)}")
+                                else:
+                                    if use_ws_price:
+                                        st.info(f"⏳ WebSocket data not available, using API price: {format_price(symbol, current_api_price)}")
+                                
+                                # Display data freshness indicator
+                                if VALIDATION_UTILS_AVAILABLE:
+                                    staleness_info = get_price_staleness_indicator(current_api_price, ws_price)
+                                    if staleness_info['staleness_level'] != 'FRESH':
+                                        if staleness_info['color'] == 'red':
+                                            st.error(f"🚨 **Data Quality Issue**: {staleness_info['message']}")
+                                        elif staleness_info['color'] == 'orange':
+                                            st.warning(f"⚠️ **Data Quality**: {staleness_info['message']}")
+                                
+                                st.info(f"📊 Using **{price_source}** price: {format_price(symbol, real_time_price)} for signal generation")
                                 
                                 prediction_data = recent_data.iloc[:-1]
                                 signal, confidence, predicted_price = predict_with_models(all_models_live, prediction_data)
@@ -2221,7 +2378,9 @@ def main():
                                                 try:
                                                     supports, resistances = get_support_resistance(recent_data)
                                                     atr_val = recent_data['ATR_14'].iloc[-1]
-                                                    ai_tp_price = calculate_ai_take_profit(signal, smart_entry_result['entry_price'], supports, resistances, atr_val)
+                                                    # Get real-time price for TP validation
+                                                    real_time_price = ws_price if ws_price and ws_price > 0 else current_api_price
+                                                    ai_tp_price = calculate_ai_take_profit(signal, smart_entry_result['entry_price'], supports, resistances, atr_val, real_time_price)
                                                 except Exception as e:
                                                     st.warning(f"⚠️ AI TP calculation failed: {e}. Using manual TP.")
 
@@ -2233,7 +2392,8 @@ def main():
                                     
                                     # Enhanced UI display
                                     display_smart_signal_results(
-                                        signal, confidence, smart_entry_result, position_info, symbol
+                                        signal, confidence, smart_entry_result, position_info, symbol,
+                                        ws_price=ws_price, current_price=current_api_price
                                     )
 
                 except Exception as e:

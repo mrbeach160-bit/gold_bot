@@ -440,3 +440,15 @@ def _get_swap_cost(symbol: str, position_size: float, trade_type: str) -> float:
         return position_size * (-0.2 if trade_type == 'BUY' else 0.1)
     else:
         return 0  # Ignore for simplicity
+
+
+def format_currency(amount: Union[float, int], currency: str = "USD") -> str:
+    """Format currency amount with appropriate symbol."""
+    try:
+        amount = float(amount)
+        if currency.upper() == "USD":
+            return f"${amount:,.2f}"
+        else:
+            return f"{amount:,.2f} {currency}"
+    except (ValueError, TypeError):
+        return f"0.00 {currency}"

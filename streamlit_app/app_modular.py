@@ -24,23 +24,23 @@ import time
 from typing import Dict, Any, Optional, List
 
 # Import our modular components
-from .modules.config import (
+from modules.config import (
     initialize_feature_flags, is_feature_enabled, configure_tensorflow,
     get_project_root, get_model_directory, LABEL_MAP, TIMEFRAME_MAPPING
 )
-from .modules.websocket_manager import EnhancedWebSocketManager, websocket_manager
-from .modules.data_utils import load_and_process_data_enhanced, get_historical_data_cached
-from .modules.models import (
+from modules.websocket_manager import EnhancedWebSocketManager, websocket_manager
+from modules.data_utils import load_and_process_data_enhanced, get_historical_data_cached
+from modules.models import (
     predict_with_models, load_all_models, train_and_save_all_models,
     sanitize_filename
 )
-from .modules.smart_entry import calculate_smart_entry_price
-from .modules.trading_utils import (
+from modules.smart_entry import calculate_smart_entry_price
+from modules.trading_utils import (
     validate_trading_inputs, calculate_position_info, calculate_ai_take_profit,
     get_conversion_rate, get_pip_value
 )
-from .modules.backtest import run_backtest, format_backtest_results, generate_backtest_summary
-from .modules.ui import (
+from modules.backtest import run_backtest, format_backtest_results, generate_backtest_summary
+from modules.ui import (
     display_smart_signal_results, format_price, format_percentage, format_currency,
     create_trading_chart, display_metrics_grid, display_data_quality_info,
     create_status_indicator

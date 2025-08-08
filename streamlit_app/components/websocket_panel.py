@@ -323,7 +323,7 @@ class WebSocketPanel:
             if 'XAU' in symbol.upper() or 'GOLD' in symbol.upper():
                 return f"${price:,.2f}"
             elif 'BTC' in symbol.upper():
-                return f"${price:,.1f}"
+                return f"${price:,.0f}"  # Round to nearest dollar for BTC
             elif 'ETH' in symbol.upper():
                 return f"${price:,.2f}"
             elif 'JPY' in symbol.upper():

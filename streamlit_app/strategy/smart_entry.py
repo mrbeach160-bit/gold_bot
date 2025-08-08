@@ -7,7 +7,7 @@ Contains the main smart entry logic for both momentum and pullback modes.
 import pandas as pd
 import numpy as np
 from .modes import ENTRY_MODE_MOMENTUM, ENTRY_MODE_PULLBACK, DEFAULT_ENTRY_MODE
-from ..core.support_resistance import get_support_resistance
+from streamlit_app.core.support_resistance import get_support_resistance
 
 # Import streamlit for error handling (temporary - should be refactored to use proper logging)
 try:

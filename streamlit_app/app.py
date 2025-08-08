@@ -120,25 +120,25 @@ except ImportError:
 # === NEW MODULAR IMPORTS ===
 try:
     # Core modules
-    from .core.indicators import add_indicators, compute_rsi
-    from .core.support_resistance import get_support_resistance
-    from .core.prediction_pipeline import predict_with_models
+    from streamlit_app.core.indicators import add_indicators, compute_rsi
+    from streamlit_app.core.support_resistance import get_support_resistance
+    from streamlit_app.core.prediction_pipeline import predict_with_models
     
     # Strategy modules
-    from .strategy.modes import (
+    from streamlit_app.strategy.modes import (
         ENTRY_MODE_MOMENTUM, ENTRY_MODE_PULLBACK, DEFAULT_ENTRY_MODE,
         ENTRY_MODES, ENTRY_MODE_DISPLAY_NAMES, ENTRY_MODE_DESCRIPTIONS
     )
-    from .strategy.smart_entry import calculate_smart_entry_price
+    from streamlit_app.strategy.smart_entry import calculate_smart_entry_price
     
     # Risk management
-    from .risk.position_sizing import calculate_position_info
+    from streamlit_app.risk.position_sizing import calculate_position_info
     
     # UI components
-    from .ui.signal_display import display_smart_signal_results
+    from streamlit_app.ui.signal_display import display_smart_signal_results
     
     # Utilities
-    from .utils.price_format import format_price
+    from streamlit_app.utils.price_format import format_price
     
     MODULAR_COMPONENTS_AVAILABLE = True
     print("✅ New modular components loaded successfully")

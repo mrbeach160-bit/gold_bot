@@ -5,11 +5,11 @@ Contains functions for displaying trading signals and related information.
 """
 
 from datetime import datetime
-from ..utils.price_format import format_price
+from streamlit_app.utils.price_format import format_price
 
 # Import validation utilities if available
 try:
-    from ..validation_utils import (
+    from streamlit_app.validation_utils import (
         validate_signal_realtime, is_signal_expired, get_signal_quality_score,
         get_price_staleness_indicator, format_quality_indicator
     )

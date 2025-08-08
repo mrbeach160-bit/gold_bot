@@ -51,7 +51,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 # Import validation utilities for real-time signal validation
 try:
-    from validation_utils import (
+    from .validation_utils import (
         validate_signal_realtime, validate_take_profit_realtime, 
         is_signal_expired, get_signal_quality_score,
         get_price_staleness_indicator, format_quality_indicator
@@ -504,6 +504,9 @@ def calculate_smart_entry_price(signal, recent_data, predicted_price, confidence
         
         strategy_reasons.extend(reasons)
         risk_level = risk
+        
+        # Calculate price distance for fill probability assessment
+        price_distance = abs(entry_price - current_price) / current_price
         
         # Calculate expected fill probability with realistic assessment
         if price_distance <= 0.001:  # 0.1%
